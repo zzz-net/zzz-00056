@@ -100,6 +100,7 @@ const AppContext = createContext<AppContextType | null>(null)
 export function AppProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(appReducer, initialState)
   const isLoadedRef = useRef(false)
+  const fallbackToLocalStorage = useRef(false)
 
   useEffect(() => {
     loadData()
@@ -113,7 +114,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const loadData = async () => {
     try {
-      if (isElectron) {
+      if (isElectron && !fallbackToLocalStorage.current) {
         const data = await (window as any).electronAPI.getData()
         dispatch({ type: 'SET_DATA', payload: data })
       } else {
@@ -126,8 +127,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
         }
       }
     } catch (e) {
-      console.error('加载数据失败', e)
-      dispatch({ type: 'SET_DATA', payload: defaultData })
+      console.error('加载数据失败，降级到 localStorage', e)
+      fallbackToLocalStorage.current = true
+      const stored = localStorage.getItem(STORAGE_KEY)
+      if (stored) {
+        const data = JSON.parse(stored)
+        dispatch({ type: 'SET_DATA', payload: data })
+      } else {
+        dispatch({ type: 'SET_DATA', payload: defaultData })
+      }
     } finally {
       setTimeout(() => {
         isLoadedRef.current = true
@@ -137,19 +145,21 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const persistData = async (data: AppData) => {
     try {
-      if (isElectron) {
+      if (isElectron && !fallbackToLocalStorage.current) {
         await (window as any).electronAPI.saveData(data)
       } else {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(data))
       }
     } catch (e) {
-      console.error('保存数据失败', e)
+      console.error('保存数据失败，降级到 localStorage', e)
+      fallbackToLocalStorage.current = true
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(data))
     }
   }
 
   const doExportCSV = async (content: string, fileName: string): Promise<boolean> => {
     try {
-      if (isElectron) {
+      if (isElectron && !fallbackToLocalStorage.current) {
         return await (window as any).electronAPI.exportCSV(content, fileName)
       } else {
         const BOM = '\uFEFF'
