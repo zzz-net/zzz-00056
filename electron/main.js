@@ -22,6 +22,9 @@ const defaultData = {
   importResults: [],
   batchLedger: [],
   currentUserId: 'user-1',
+  importSchemes: [],
+  schemeAuditLog: [],
+  lastSelectedSchemeId: null,
 }
 
 function mergeWithDefaults(data) {
@@ -30,6 +33,9 @@ function mergeWithDefaults(data) {
     ...data,
     importResults: data.importResults || [],
     batchLedger: data.batchLedger || [],
+    importSchemes: data.importSchemes || [],
+    schemeAuditLog: data.schemeAuditLog || [],
+    lastSelectedSchemeId: data.lastSelectedSchemeId || null,
     samples: (data.samples || []).map((s) => ({
       ...s,
       history: s.history || [],
@@ -103,6 +109,19 @@ ipcMain.handle('exportCSV', (_event, content, defaultName) => {
   })
   if (result) {
     fs.writeFileSync(result, '\uFEFF' + content, 'utf-8')
+    return true
+  }
+  return false
+})
+
+ipcMain.handle('exportJSON', (_event, content, defaultName) => {
+  const result = dialog.showSaveDialogSync(mainWindow, {
+    title: '导出方案',
+    defaultPath: defaultName,
+    filters: [{ name: 'JSON 文件', extensions: ['json'] }],
+  })
+  if (result) {
+    fs.writeFileSync(result, content, 'utf-8')
     return true
   }
   return false

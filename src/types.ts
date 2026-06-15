@@ -111,6 +111,53 @@ export interface PrevalidateSummary {
   results: PrevalidateResult[]
 }
 
+export interface ColumnMapping {
+  csvColumn: string
+  targetField: string
+}
+
+export interface ValidationToggles {
+  skipEmptySampleNo: boolean
+  skipDuplicateInFile: boolean
+  skipDuplicateInBatch: boolean
+  skipInvalidQuantity: boolean
+  skipEmptySource: boolean
+}
+
+export interface DefaultBatchInfo {
+  batchNoPattern: string
+  batchNamePattern: string
+}
+
+export interface ImportScheme {
+  id: string
+  name: string
+  columnMappings: ColumnMapping[]
+  defaultBatch: DefaultBatchInfo
+  validationToggles: ValidationToggles
+  isShared: boolean
+  isLocked: boolean
+  createdBy: string
+  createdById: string
+  createdAt: string
+  updatedAt: string
+}
+
+export type SchemeAuditAction = 'create' | 'rename' | 'copy' | 'delete' | 'modify' | 'import' | 'export' | 'lock' | 'unlock'
+
+export interface SchemeAuditLogEntry {
+  id: string
+  schemeId: string
+  schemeName: string
+  action: SchemeAuditAction
+  operatorId: string
+  operatorName: string
+  timestamp: string
+  detail?: string
+}
+
+export type ConflictResolution = 'overwrite' | 'skip'
+
 export interface AppData {
   users: User[]
   batches: Batch[]
@@ -118,4 +165,7 @@ export interface AppData {
   importResults: ImportResult[]
   batchLedger: BatchLedgerEntry[]
   currentUserId: string | null
+  importSchemes: ImportScheme[]
+  schemeAuditLog: SchemeAuditLogEntry[]
+  lastSelectedSchemeId: string | null
 }

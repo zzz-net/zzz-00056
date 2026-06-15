@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useReducer, useEffect, ReactNode, useState, useRef } from 'react'
-import { AppData, Sample, Batch, HistoryRecord, SampleStatus, User, ImportResult, BatchLedgerEntry, PrevalidateSummary, PrevalidateResult } from '../types'
+import { AppData, Sample, Batch, HistoryRecord, SampleStatus, User, ImportResult, BatchLedgerEntry, PrevalidateSummary, PrevalidateResult, ImportScheme, SchemeAuditLogEntry, SchemeAuditAction, ConflictResolution, ColumnMapping, ValidationToggles, DefaultBatchInfo } from '../types'
 import { v4 as uuidv4 } from 'uuid'
 
 const STORAGE_KEY = 'lab-sample-tracker-data'
@@ -17,6 +17,11 @@ type Action =
   | { type: 'UNDO_LAST_STATUS'; sampleId: string; history: HistoryRecord; restoreStatus: SampleStatus; clearHandover?: boolean }
   | { type: 'ADD_IMPORT_RESULT'; payload: ImportResult }
   | { type: 'ADD_BATCH_LEDGER_ENTRY'; payload: BatchLedgerEntry }
+  | { type: 'ADD_IMPORT_SCHEME'; payload: ImportScheme }
+  | { type: 'UPDATE_IMPORT_SCHEME'; payload: ImportScheme }
+  | { type: 'DELETE_IMPORT_SCHEME'; schemeId: string }
+  | { type: 'ADD_SCHEME_AUDIT_LOG'; payload: SchemeAuditLogEntry }
+  | { type: 'SET_LAST_SELECTED_SCHEME'; schemeId: string | null }
 
 const defaultData: AppData = {
   users: [
@@ -28,6 +33,9 @@ const defaultData: AppData = {
   importResults: [],
   batchLedger: [],
   currentUserId: 'user-1',
+  importSchemes: [],
+  schemeAuditLog: [],
+  lastSelectedSchemeId: null,
 }
 
 const initialState: AppState = defaultData
@@ -83,6 +91,31 @@ function appReducer(state: AppState, action: Action): AppState {
         ...state,
         batchLedger: [...state.batchLedger, action.payload],
       }
+    case 'ADD_IMPORT_SCHEME':
+      return {
+        ...state,
+        importSchemes: [...state.importSchemes, action.payload],
+      }
+    case 'UPDATE_IMPORT_SCHEME':
+      return {
+        ...state,
+        importSchemes: state.importSchemes.map((s) =>
+          s.id === action.payload.id ? action.payload : s
+        ),
+      }
+    case 'DELETE_IMPORT_SCHEME':
+      return {
+        ...state,
+        importSchemes: state.importSchemes.filter((s) => s.id !== action.schemeId),
+        lastSelectedSchemeId: state.lastSelectedSchemeId === action.schemeId ? null : state.lastSelectedSchemeId,
+      }
+    case 'ADD_SCHEME_AUDIT_LOG':
+      return {
+        ...state,
+        schemeAuditLog: [...state.schemeAuditLog, action.payload],
+      }
+    case 'SET_LAST_SELECTED_SCHEME':
+      return { ...state, lastSelectedSchemeId: action.schemeId }
     default:
       return state
   }
@@ -123,6 +156,27 @@ interface AppContextType {
     byAction: Record<string, number>
     bySample: Record<string, number>
   }
+  canModifyScheme: (scheme: ImportScheme) => boolean
+  createImportScheme: (name: string, opts?: {
+    columnMappings?: ColumnMapping[]
+    defaultBatch?: DefaultBatchInfo
+    validationToggles?: ValidationToggles
+    isShared?: boolean
+    isLocked?: boolean
+  }) => ImportScheme
+  renameImportScheme: (schemeId: string, newName: string) => { success: boolean; error?: string }
+  copyImportScheme: (schemeId: string, newName: string) => { success: boolean; error?: string; copiedScheme?: ImportScheme }
+  deleteImportScheme: (schemeId: string) => { success: boolean; error?: string }
+  modifyImportScheme: (schemeId: string, updates: Partial<ImportScheme>) => { success: boolean; error?: string }
+  lockScheme: (schemeId: string) => { success: boolean; error?: string }
+  unlockScheme: (schemeId: string) => { success: boolean; error?: string }
+  exportSchemesJSON: (schemeIds: string[]) => string
+  importSchemesJSON: (jsonString: string, conflictResolution: ConflictResolution) => {
+    success: boolean; error?: string; importedCount: number; skippedCount: number; overwrittenCount: number
+  }
+  setLastSelectedScheme: (schemeId: string | null) => void
+  getSchemeAuditLog: (schemeId: string) => SchemeAuditLogEntry[]
+  doExportJSON: (content: string, fileName: string) => Promise<boolean>
 }
 
 const AppContext = createContext<AppContextType | null>(null)
@@ -148,6 +202,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
       ...data,
       importResults: data.importResults || [],
       batchLedger: data.batchLedger || [],
+      importSchemes: data.importSchemes || [],
+      schemeAuditLog: data.schemeAuditLog || [],
+      lastSelectedSchemeId: data.lastSelectedSchemeId || null,
       samples: (data.samples || []).map((s) => ({
         ...s,
         history: s.history || [],
@@ -689,6 +746,238 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return stats
   }
 
+  const defaultValidationToggles: ValidationToggles = {
+    skipEmptySampleNo: true,
+    skipDuplicateInFile: true,
+    skipDuplicateInBatch: true,
+    skipInvalidQuantity: true,
+    skipEmptySource: true,
+  }
+
+  const canModifyScheme = (scheme: ImportScheme): boolean => {
+    if (scheme.isLocked && scheme.isShared && scheme.createdById !== state.currentUserId) {
+      return false
+    }
+    return true
+  }
+
+  const addSchemeAuditLog = (schemeId: string, schemeName: string, action: SchemeAuditAction, detail?: string) => {
+    const user = getCurrentUser()
+    const entry: SchemeAuditLogEntry = {
+      id: uuidv4(),
+      schemeId,
+      schemeName,
+      action,
+      operatorId: state.currentUserId || '',
+      operatorName: user?.username || '未知',
+      timestamp: new Date().toISOString(),
+      detail,
+    }
+    dispatch({ type: 'ADD_SCHEME_AUDIT_LOG', payload: entry })
+  }
+
+  const createImportScheme = (name: string, opts?: {
+    columnMappings?: ColumnMapping[]
+    defaultBatch?: DefaultBatchInfo
+    validationToggles?: ValidationToggles
+    isShared?: boolean
+    isLocked?: boolean
+  }): ImportScheme => {
+    const user = getCurrentUser()
+    const scheme: ImportScheme = {
+      id: uuidv4(),
+      name,
+      columnMappings: opts?.columnMappings || [
+        { csvColumn: '样本编号', targetField: 'sampleNo' },
+        { csvColumn: '数量', targetField: 'quantity' },
+        { csvColumn: '来源', targetField: 'source' },
+      ],
+      defaultBatch: opts?.defaultBatch || { batchNoPattern: '', batchNamePattern: '' },
+      validationToggles: opts?.validationToggles || { ...defaultValidationToggles },
+      isShared: opts?.isShared || false,
+      isLocked: opts?.isLocked || false,
+      createdBy: user?.username || '未知',
+      createdById: state.currentUserId || '',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }
+    dispatch({ type: 'ADD_IMPORT_SCHEME', payload: scheme })
+    addSchemeAuditLog(scheme.id, scheme.name, 'create', '创建导入方案')
+    return scheme
+  }
+
+  const renameImportScheme = (schemeId: string, newName: string): { success: boolean; error?: string } => {
+    const scheme = state.importSchemes.find((s) => s.id === schemeId)
+    if (!scheme) return { success: false, error: '方案不存在' }
+    if (!canModifyScheme(scheme)) return { success: false, error: '无权修改此方案（他人锁定共享方案）' }
+    const oldName = scheme.name
+    const updated: ImportScheme = { ...scheme, name: newName, updatedAt: new Date().toISOString() }
+    dispatch({ type: 'UPDATE_IMPORT_SCHEME', payload: updated })
+    addSchemeAuditLog(schemeId, newName, 'rename', `方案重命名：${oldName} → ${newName}`)
+    return { success: true }
+  }
+
+  const copyImportScheme = (schemeId: string, newName: string): { success: boolean; error?: string; copiedScheme?: ImportScheme } => {
+    const scheme = state.importSchemes.find((s) => s.id === schemeId)
+    if (!scheme) return { success: false, error: '方案不存在' }
+    const user = getCurrentUser()
+    const copied: ImportScheme = {
+      ...scheme,
+      id: uuidv4(),
+      name: newName,
+      isShared: false,
+      isLocked: false,
+      createdBy: user?.username || '未知',
+      createdById: state.currentUserId || '',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }
+    dispatch({ type: 'ADD_IMPORT_SCHEME', payload: copied })
+    addSchemeAuditLog(copied.id, newName, 'copy', `从方案「${scheme.name}」复制`)
+    return { success: true, copiedScheme: copied }
+  }
+
+  const deleteImportScheme = (schemeId: string): { success: boolean; error?: string } => {
+    const scheme = state.importSchemes.find((s) => s.id === schemeId)
+    if (!scheme) return { success: false, error: '方案不存在' }
+    if (!canModifyScheme(scheme)) return { success: false, error: '无权删除此方案（他人锁定共享方案）' }
+    dispatch({ type: 'DELETE_IMPORT_SCHEME', schemeId })
+    addSchemeAuditLog(schemeId, scheme.name, 'delete', `删除方案「${scheme.name}」`)
+    return { success: true }
+  }
+
+  const modifyImportScheme = (schemeId: string, updates: Partial<ImportScheme>): { success: boolean; error?: string } => {
+    const scheme = state.importSchemes.find((s) => s.id === schemeId)
+    if (!scheme) return { success: false, error: '方案不存在' }
+    if (!canModifyScheme(scheme)) return { success: false, error: '无权修改此方案（他人锁定共享方案）' }
+    const updated: ImportScheme = { ...scheme, ...updates, updatedAt: new Date().toISOString() }
+    dispatch({ type: 'UPDATE_IMPORT_SCHEME', payload: updated })
+    addSchemeAuditLog(schemeId, updated.name, 'modify', '修改方案配置')
+    return { success: true }
+  }
+
+  const lockScheme = (schemeId: string): { success: boolean; error?: string } => {
+    const scheme = state.importSchemes.find((s) => s.id === schemeId)
+    if (!scheme) return { success: false, error: '方案不存在' }
+    if (scheme.createdById !== state.currentUserId) return { success: false, error: '只有方案创建者才能锁定' }
+    const updated: ImportScheme = { ...scheme, isLocked: true, isShared: true, updatedAt: new Date().toISOString() }
+    dispatch({ type: 'UPDATE_IMPORT_SCHEME', payload: updated })
+    addSchemeAuditLog(schemeId, scheme.name, 'lock', '锁定共享方案')
+    return { success: true }
+  }
+
+  const unlockScheme = (schemeId: string): { success: boolean; error?: string } => {
+    const scheme = state.importSchemes.find((s) => s.id === schemeId)
+    if (!scheme) return { success: false, error: '方案不存在' }
+    if (scheme.createdById !== state.currentUserId) return { success: false, error: '只有方案创建者才能解锁' }
+    const updated: ImportScheme = { ...scheme, isLocked: false, updatedAt: new Date().toISOString() }
+    dispatch({ type: 'UPDATE_IMPORT_SCHEME', payload: updated })
+    addSchemeAuditLog(schemeId, scheme.name, 'unlock', '解锁方案')
+    return { success: true }
+  }
+
+  const exportSchemesJSON = (schemeIds: string[]): string => {
+    const schemes = state.importSchemes.filter((s) => schemeIds.includes(s.id))
+    const user = getCurrentUser()
+    const exportData = {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      exportedBy: user?.username || '未知',
+      schemes,
+    }
+    for (const s of schemes) {
+      addSchemeAuditLog(s.id, s.name, 'export', '导出方案')
+    }
+    return JSON.stringify(exportData, null, 2)
+  }
+
+  const importSchemesJSON = (jsonString: string, conflictResolution: ConflictResolution): {
+    success: boolean; error?: string; importedCount: number; skippedCount: number; overwrittenCount: number
+  } => {
+    let importData: { version: number; exportedAt: string; exportedBy: string; schemes: ImportScheme[] }
+    try {
+      importData = JSON.parse(jsonString)
+    } catch {
+      return { success: false, error: 'JSON格式无效', importedCount: 0, skippedCount: 0, overwrittenCount: 0 }
+    }
+    if (!importData.schemes || !Array.isArray(importData.schemes)) {
+      return { success: false, error: '导入数据缺少schemes字段', importedCount: 0, skippedCount: 0, overwrittenCount: 0 }
+    }
+
+    let importedCount = 0
+    let skippedCount = 0
+    let overwrittenCount = 0
+    const user = getCurrentUser()
+
+    for (const scheme of importData.schemes) {
+      const existingByName = state.importSchemes.find((s) => s.name === scheme.name)
+      if (existingByName) {
+        if (conflictResolution === 'skip') {
+          skippedCount++
+          continue
+        } else if (conflictResolution === 'overwrite') {
+          if (!canModifyScheme(existingByName)) {
+            skippedCount++
+            continue
+          }
+          const updated: ImportScheme = {
+            ...scheme,
+            id: existingByName.id,
+            updatedAt: new Date().toISOString(),
+          }
+          dispatch({ type: 'UPDATE_IMPORT_SCHEME', payload: updated })
+          overwrittenCount++
+          addSchemeAuditLog(existingByName.id, scheme.name, 'import', `导入覆盖方案「${scheme.name}」`)
+          continue
+        }
+      }
+      const newScheme: ImportScheme = {
+        ...scheme,
+        id: uuidv4(),
+        createdBy: user?.username || '未知',
+        createdById: state.currentUserId || '',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        isShared: false,
+        isLocked: false,
+      }
+      dispatch({ type: 'ADD_IMPORT_SCHEME', payload: newScheme })
+      importedCount++
+      addSchemeAuditLog(newScheme.id, newScheme.name, 'import', `导入新方案「${newScheme.name}」`)
+    }
+
+    return { success: true, importedCount, skippedCount, overwrittenCount }
+  }
+
+  const setLastSelectedScheme = (schemeId: string | null) => {
+    dispatch({ type: 'SET_LAST_SELECTED_SCHEME', schemeId })
+  }
+
+  const getSchemeAuditLog = (schemeId: string): SchemeAuditLogEntry[] => {
+    return state.schemeAuditLog.filter((l) => l.schemeId === schemeId)
+  }
+
+  const doExportJSON = async (content: string, fileName: string): Promise<boolean> => {
+    try {
+      if (isElectron && !fallbackToLocalStorage.current) {
+        return await (window as any).electronAPI.exportJSON(content, fileName)
+      } else {
+        const blob = new Blob([content], { type: 'application/json' })
+        const url = URL.createObjectURL(blob)
+        const link = document.createElement('a')
+        link.href = url
+        link.download = fileName
+        document.body.appendChild(link)
+        link.click()
+        document.body.removeChild(link)
+        URL.revokeObjectURL(url)
+        return true
+      }
+    } catch {
+      return false
+    }
+  }
+
   return (
     <AppContext.Provider
       value={{
@@ -710,6 +999,19 @@ export function AppProvider({ children }: { children: ReactNode }) {
         batchImportSamples,
         exportBatchLedgerCSV,
         getBatchLedgerSummary,
+        canModifyScheme,
+        createImportScheme,
+        renameImportScheme,
+        copyImportScheme,
+        deleteImportScheme,
+        modifyImportScheme,
+        lockScheme,
+        unlockScheme,
+        exportSchemesJSON,
+        importSchemesJSON,
+        setLastSelectedScheme,
+        getSchemeAuditLog,
+        doExportJSON,
       }}
     >
       {children}

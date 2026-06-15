@@ -764,11 +764,650 @@ const sortedResults = [...state12b.importResults].sort(
 );
 assert(sortedResults[0].id === record12a.id || sortedResults[1].id === record12a.id, '按时间倒序排列');
 
-console.log('\n========== 测试结果 ==========');
+console.log('\n========== 导入方案管理 回归测试 ==========\n');
+
+function createSchemeInitialState() {
+  return {
+    users: [
+      { id: 'user-1', username: '操作员小王', role: 'operator' },
+      { id: 'user-2', username: '复核员老李', role: 'reviewer' },
+    ],
+    batches: [],
+    samples: [],
+    importResults: [],
+    batchLedger: [],
+    currentUserId: 'user-1',
+    importSchemes: [],
+    schemeAuditLog: [],
+    lastSelectedSchemeId: null,
+  };
+}
+
+const defaultValidationToggles = {
+  skipEmptySampleNo: true,
+  skipDuplicateInFile: true,
+  skipDuplicateInBatch: true,
+  skipInvalidQuantity: true,
+  skipEmptySource: true,
+};
+
+function schemeReducer(state, action) {
+  switch (action.type) {
+    case 'ADD_IMPORT_SCHEME':
+      return { ...state, importSchemes: [...state.importSchemes, action.payload] };
+    case 'UPDATE_IMPORT_SCHEME':
+      return {
+        ...state,
+        importSchemes: state.importSchemes.map((s) =>
+          s.id === action.payload.id ? action.payload : s
+        ),
+      };
+    case 'DELETE_IMPORT_SCHEME':
+      return {
+        ...state,
+        importSchemes: state.importSchemes.filter((s) => s.id !== action.schemeId),
+      };
+    case 'ADD_SCHEME_AUDIT_LOG':
+      return {
+        ...state,
+        schemeAuditLog: [...state.schemeAuditLog, action.payload],
+      };
+    case 'SET_LAST_SELECTED_SCHEME':
+      return { ...state, lastSelectedSchemeId: action.schemeId };
+    case 'SET_DATA':
+      return action.payload;
+    default:
+      return state;
+  }
+}
+
+function getSchemeAuditLog(state, schemeId) {
+  return state.schemeAuditLog.filter((l) => l.schemeId === schemeId);
+}
+
+function canModifyScheme(state, scheme) {
+  if (scheme.isLocked && scheme.isShared && scheme.createdById !== state.currentUserId) {
+    return false;
+  }
+  return true;
+}
+
+function createImportScheme(state, name, opts = {}) {
+  const user = state.users.find((u) => u.id === state.currentUserId);
+  const scheme = {
+    id: uuidv4(),
+    name,
+    columnMappings: opts.columnMappings || [
+      { csvColumn: '样本编号', targetField: 'sampleNo' },
+      { csvColumn: '数量', targetField: 'quantity' },
+      { csvColumn: '来源', targetField: 'source' },
+    ],
+    defaultBatch: opts.defaultBatch || { batchNoPattern: '', batchNamePattern: '' },
+    validationToggles: opts.validationToggles || { ...defaultValidationToggles },
+    isShared: opts.isShared || false,
+    isLocked: opts.isLocked || false,
+    createdBy: user?.username || '未知',
+    createdById: state.currentUserId,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  let newState = schemeReducer(state, { type: 'ADD_IMPORT_SCHEME', payload: scheme });
+  const auditEntry = {
+    id: uuidv4(),
+    schemeId: scheme.id,
+    schemeName: scheme.name,
+    action: 'create',
+    operatorId: state.currentUserId,
+    operatorName: user?.username || '未知',
+    timestamp: new Date().toISOString(),
+    detail: '创建导入方案',
+  };
+  newState = schemeReducer(newState, { type: 'ADD_SCHEME_AUDIT_LOG', payload: auditEntry });
+
+  return { state: newState, scheme };
+}
+
+function renameImportScheme(state, schemeId, newName) {
+  const scheme = state.importSchemes.find((s) => s.id === schemeId);
+  if (!scheme) return { state, success: false, error: '方案不存在' };
+  if (!canModifyScheme(state, scheme)) {
+    return { state, success: false, error: '无权修改此方案（他人锁定共享方案）' };
+  }
+  const oldName = scheme.name;
+  const updated = { ...scheme, name: newName, updatedAt: new Date().toISOString() };
+  let newState = schemeReducer(state, { type: 'UPDATE_IMPORT_SCHEME', payload: updated });
+  const user = state.users.find((u) => u.id === state.currentUserId);
+  const auditEntry = {
+    id: uuidv4(),
+    schemeId,
+    schemeName: newName,
+    action: 'rename',
+    operatorId: state.currentUserId,
+    operatorName: user?.username || '未知',
+    timestamp: new Date().toISOString(),
+    detail: `方案重命名：${oldName} → ${newName}`,
+  };
+  newState = schemeReducer(newState, { type: 'ADD_SCHEME_AUDIT_LOG', payload: auditEntry });
+  return { state: newState, success: true };
+}
+
+function copyImportScheme(state, schemeId, newName) {
+  const scheme = state.importSchemes.find((s) => s.id === schemeId);
+  if (!scheme) return { state, success: false, error: '方案不存在' };
+  const user = state.users.find((u) => u.id === state.currentUserId);
+  const copied = {
+    ...scheme,
+    id: uuidv4(),
+    name: newName,
+    isShared: false,
+    isLocked: false,
+    createdBy: user?.username || '未知',
+    createdById: state.currentUserId,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  let newState = schemeReducer(state, { type: 'ADD_IMPORT_SCHEME', payload: copied });
+  const auditEntry = {
+    id: uuidv4(),
+    schemeId: copied.id,
+    schemeName: newName,
+    action: 'copy',
+    operatorId: state.currentUserId,
+    operatorName: user?.username || '未知',
+    timestamp: new Date().toISOString(),
+    detail: `从方案「${scheme.name}」复制`,
+  };
+  newState = schemeReducer(newState, { type: 'ADD_SCHEME_AUDIT_LOG', payload: auditEntry });
+  return { state: newState, success: true, copiedScheme: copied };
+}
+
+function deleteImportScheme(state, schemeId) {
+  const scheme = state.importSchemes.find((s) => s.id === schemeId);
+  if (!scheme) return { state, success: false, error: '方案不存在' };
+  if (!canModifyScheme(state, scheme)) {
+    return { state, success: false, error: '无权删除此方案（他人锁定共享方案）' };
+  }
+  let newState = schemeReducer(state, { type: 'DELETE_IMPORT_SCHEME', schemeId });
+  const user = state.users.find((u) => u.id === state.currentUserId);
+  const auditEntry = {
+    id: uuidv4(),
+    schemeId,
+    schemeName: scheme.name,
+    action: 'delete',
+    operatorId: state.currentUserId,
+    operatorName: user?.username || '未知',
+    timestamp: new Date().toISOString(),
+    detail: `删除方案「${scheme.name}」`,
+  };
+  newState = schemeReducer(newState, { type: 'ADD_SCHEME_AUDIT_LOG', payload: auditEntry });
+  if (newState.lastSelectedSchemeId === schemeId) {
+    newState = schemeReducer(newState, { type: 'SET_LAST_SELECTED_SCHEME', schemeId: null });
+  }
+  return { state: newState, success: true };
+}
+
+function modifyImportScheme(state, schemeId, updates) {
+  const scheme = state.importSchemes.find((s) => s.id === schemeId);
+  if (!scheme) return { state, success: false, error: '方案不存在' };
+  if (!canModifyScheme(state, scheme)) {
+    return { state, success: false, error: '无权修改此方案（他人锁定共享方案）' };
+  }
+  const updated = { ...scheme, ...updates, updatedAt: new Date().toISOString() };
+  let newState = schemeReducer(state, { type: 'UPDATE_IMPORT_SCHEME', payload: updated });
+  const user = state.users.find((u) => u.id === state.currentUserId);
+  const auditEntry = {
+    id: uuidv4(),
+    schemeId,
+    schemeName: updated.name,
+    action: 'modify',
+    operatorId: state.currentUserId,
+    operatorName: user?.username || '未知',
+    timestamp: new Date().toISOString(),
+    detail: '修改方案配置',
+  };
+  newState = schemeReducer(newState, { type: 'ADD_SCHEME_AUDIT_LOG', payload: auditEntry });
+  return { state: newState, success: true };
+}
+
+function exportSchemesJSON(state, schemeIds) {
+  const schemes = state.importSchemes.filter((s) => schemeIds.includes(s.id));
+  const exportData = {
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    exportedBy: state.users.find((u) => u.id === state.currentUserId)?.username || '未知',
+    schemes,
+  };
+  const user = state.users.find((u) => u.id === state.currentUserId);
+  let newState = state;
+  for (const s of schemes) {
+    const auditEntry = {
+      id: uuidv4(),
+      schemeId: s.id,
+      schemeName: s.name,
+      action: 'export',
+      operatorId: state.currentUserId,
+      operatorName: user?.username || '未知',
+      timestamp: new Date().toISOString(),
+      detail: '导出方案',
+    };
+    newState = schemeReducer(newState, { type: 'ADD_SCHEME_AUDIT_LOG', payload: auditEntry });
+  }
+  return { state: newState, json: JSON.stringify(exportData, null, 2) };
+}
+
+function importSchemesJSON(state, jsonString, conflictResolution = 'skip') {
+  const user = state.users.find((u) => u.id === state.currentUserId);
+  let importData;
+  try {
+    importData = JSON.parse(jsonString);
+  } catch (e) {
+    return { state, success: false, error: 'JSON格式无效' };
+  }
+  if (!importData.schemes || !Array.isArray(importData.schemes)) {
+    return { state, success: false, error: '导入数据缺少schemes字段' };
+  }
+  let newState = state;
+  let importedCount = 0;
+  let skippedCount = 0;
+  let overwrittenCount = 0;
+
+  for (const scheme of importData.schemes) {
+    const existingByName = newState.importSchemes.find((s) => s.name === scheme.name);
+    if (existingByName) {
+      if (conflictResolution === 'skip') {
+        skippedCount++;
+        continue;
+      } else if (conflictResolution === 'overwrite') {
+        if (!canModifyScheme(newState, existingByName)) {
+          skippedCount++;
+          continue;
+        }
+        const updated = {
+          ...scheme,
+          id: existingByName.id,
+          updatedBy: user?.username || '未知',
+          updatedAt: new Date().toISOString(),
+        };
+        newState = schemeReducer(newState, { type: 'UPDATE_IMPORT_SCHEME', payload: updated });
+        overwrittenCount++;
+        const auditEntry = {
+          id: uuidv4(),
+          schemeId: existingByName.id,
+          schemeName: scheme.name,
+          action: 'import',
+          operatorId: state.currentUserId,
+          operatorName: user?.username || '未知',
+          timestamp: new Date().toISOString(),
+          detail: `导入覆盖方案「${scheme.name}」`,
+        };
+        newState = schemeReducer(newState, { type: 'ADD_SCHEME_AUDIT_LOG', payload: auditEntry });
+        continue;
+      }
+    }
+    const newScheme = {
+      ...scheme,
+      id: uuidv4(),
+      createdBy: user?.username || '未知',
+      createdById: state.currentUserId,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      isShared: false,
+      isLocked: false,
+    };
+    newState = schemeReducer(newState, { type: 'ADD_IMPORT_SCHEME', payload: newScheme });
+    importedCount++;
+    const auditEntry = {
+      id: uuidv4(),
+      schemeId: newScheme.id,
+      schemeName: newScheme.name,
+      action: 'import',
+      operatorId: state.currentUserId,
+      operatorName: user?.username || '未知',
+      timestamp: new Date().toISOString(),
+      detail: `导入新方案「${newScheme.name}」`,
+    };
+    newState = schemeReducer(newState, { type: 'ADD_SCHEME_AUDIT_LOG', payload: auditEntry });
+  }
+
+  return {
+    state: newState,
+    success: true,
+    importedCount,
+    skippedCount,
+    overwrittenCount,
+  };
+}
+
+function lockScheme(state, schemeId) {
+  const scheme = state.importSchemes.find((s) => s.id === schemeId);
+  if (!scheme) return { state, success: false, error: '方案不存在' };
+  if (scheme.createdById !== state.currentUserId) {
+    return { state, success: false, error: '只有方案创建者才能锁定' };
+  }
+  const updated = { ...scheme, isLocked: true, isShared: true, updatedAt: new Date().toISOString() };
+  let newState = schemeReducer(state, { type: 'UPDATE_IMPORT_SCHEME', payload: updated });
+  const user = state.users.find((u) => u.id === state.currentUserId);
+  const auditEntry = {
+    id: uuidv4(),
+    schemeId,
+    schemeName: scheme.name,
+    action: 'lock',
+    operatorId: state.currentUserId,
+    operatorName: user?.username || '未知',
+    timestamp: new Date().toISOString(),
+    detail: '锁定共享方案',
+  };
+  newState = schemeReducer(newState, { type: 'ADD_SCHEME_AUDIT_LOG', payload: auditEntry });
+  return { state: newState, success: true };
+}
+
+function unlockScheme(state, schemeId) {
+  const scheme = state.importSchemes.find((s) => s.id === schemeId);
+  if (!scheme) return { state, success: false, error: '方案不存在' };
+  if (scheme.createdById !== state.currentUserId) {
+    return { state, success: false, error: '只有方案创建者才能解锁' };
+  }
+  const updated = { ...scheme, isLocked: false, updatedAt: new Date().toISOString() };
+  let newState = schemeReducer(state, { type: 'UPDATE_IMPORT_SCHEME', payload: updated });
+  const user = state.users.find((u) => u.id === state.currentUserId);
+  const auditEntry = {
+    id: uuidv4(),
+    schemeId,
+    schemeName: scheme.name,
+    action: 'unlock',
+    operatorId: state.currentUserId,
+    operatorName: user?.username || '未知',
+    timestamp: new Date().toISOString(),
+    detail: '解锁方案',
+  };
+  newState = schemeReducer(newState, { type: 'ADD_SCHEME_AUDIT_LOG', payload: auditEntry });
+  return { state: newState, success: true };
+}
+
+let schemeState = createSchemeInitialState();
+
+console.log('【测试13】导入方案 - 创建方案');
+const { state: s13, scheme: scheme1 } = createImportScheme(schemeState, '标准导入方案', {
+  columnMappings: [
+    { csvColumn: '样本编号', targetField: 'sampleNo' },
+    { csvColumn: '数量', targetField: 'quantity' },
+    { csvColumn: '来源', targetField: 'source' },
+  ],
+  defaultBatch: { batchNoPattern: 'BATCH-{DATE}', batchNamePattern: '日常送检' },
+  validationToggles: { ...defaultValidationToggles },
+});
+schemeState = s13;
+assert(schemeState.importSchemes.length === 1, '方案列表有1个方案');
+assert(schemeState.importSchemes[0].name === '标准导入方案', '方案名称正确');
+assert(schemeState.importSchemes[0].columnMappings.length === 3, '列映射数量正确');
+assert(schemeState.importSchemes[0].createdBy === '操作员小王', '创建人正确');
+assert(schemeState.importSchemes[0].createdById === 'user-1', '创建人ID正确');
+assert(schemeState.schemeAuditLog.length === 1, '审计日志1条');
+assert(schemeState.schemeAuditLog[0].action === 'create', '审计操作为create');
+assert(schemeState.schemeAuditLog[0].schemeId === scheme1.id, '审计日志关联方案ID正确');
+
+console.log('\n【测试14】导入方案 - 重命名方案');
+const renameResult = renameImportScheme(schemeState, scheme1.id, '日常标准导入');
+assert(renameResult.success === true, '重命名成功');
+schemeState = renameResult.state;
+assert(schemeState.importSchemes[0].name === '日常标准导入', '方案名称已更新');
+assert(schemeState.schemeAuditLog.length === 2, '审计日志2条');
+assert(schemeState.schemeAuditLog[1].action === 'rename', '审计操作为rename');
+assert(schemeState.schemeAuditLog[1].detail.includes('日常标准导入'), '审计详情含新名称');
+
+console.log('\n【测试15】导入方案 - 复制方案');
+const copyResult = copyImportScheme(schemeState, scheme1.id, '日常标准导入-副本');
+assert(copyResult.success === true, '复制成功');
+schemeState = copyResult.state;
+assert(schemeState.importSchemes.length === 2, '方案列表有2个方案');
+assert(schemeState.importSchemes[1].name === '日常标准导入-副本', '副本名称正确');
+assert(schemeState.importSchemes[1].id !== scheme1.id, '副本ID不同于原方案');
+assert(schemeState.importSchemes[1].isShared === false, '副本默认不共享');
+assert(schemeState.importSchemes[1].isLocked === false, '副本默认不锁定');
+assert(schemeState.importSchemes[1].createdById === 'user-1', '副本创建人为当前用户');
+assert(schemeState.schemeAuditLog.length === 3, '审计日志3条');
+assert(schemeState.schemeAuditLog[2].action === 'copy', '审计操作为copy');
+
+console.log('\n【测试16】导入方案 - 删除方案');
+const copiedId = schemeState.importSchemes[1].id;
+const deleteResult = deleteImportScheme(schemeState, copiedId);
+assert(deleteResult.success === true, '删除成功');
+schemeState = deleteResult.state;
+assert(schemeState.importSchemes.length === 1, '方案列表剩1个方案');
+assert(schemeState.schemeAuditLog.length === 4, '审计日志4条');
+assert(schemeState.schemeAuditLog[3].action === 'delete', '审计操作为delete');
+
+console.log('\n【测试17】导入方案 - 修改方案配置');
+const modifyResult = modifyImportScheme(schemeState, scheme1.id, {
+  validationToggles: { ...defaultValidationToggles, skipEmptySource: false },
+  defaultBatch: { batchNoPattern: 'BATCH-{DATE}-{SEQ}', batchNamePattern: '紧急送检' },
+});
+assert(modifyResult.success === true, '修改成功');
+schemeState = modifyResult.state;
+assert(schemeState.importSchemes[0].validationToggles.skipEmptySource === false, '校验开关已更新');
+assert(schemeState.importSchemes[0].defaultBatch.batchNoPattern === 'BATCH-{DATE}-{SEQ}', '默认批次信息已更新');
+assert(schemeState.schemeAuditLog.length === 5, '审计日志5条');
+assert(schemeState.schemeAuditLog[4].action === 'modify', '审计操作为modify');
+
+console.log('\n【测试18】导入方案 - 导出JSON');
+const exportResult = exportSchemesJSON(schemeState, [scheme1.id]);
+assert(exportResult.json !== undefined, '导出JSON不为空');
+schemeState = exportResult.state;
+const parsed = JSON.parse(exportResult.json);
+assert(parsed.version === 1, '导出版本号为1');
+assert(parsed.schemes.length === 1, '导出1个方案');
+assert(parsed.schemes[0].name === '日常标准导入', '导出方案名称正确');
+assert(parsed.exportedBy === '操作员小王', '导出人正确');
+assert(schemeState.schemeAuditLog.length === 6, '审计日志6条');
+assert(schemeState.schemeAuditLog[5].action === 'export', '审计操作为export');
+
+console.log('\n【测试19】导入方案 - 导入JSON（无冲突）');
+const { state: s19, scheme: scheme2 } = createImportScheme(
+  createSchemeInitialState(),
+  '另一方案',
+  { isShared: true }
+);
+let state19 = s19;
+state19.currentUserId = 'user-1';
+const newSchemeJSON = JSON.stringify({
+  version: 1,
+  exportedAt: new Date().toISOString(),
+  exportedBy: '外部用户',
+  schemes: [{
+    name: '外部方案A',
+    columnMappings: [{ csvColumn: '编号', targetField: 'sampleNo' }],
+    defaultBatch: { batchNoPattern: 'EXT-{DATE}', batchNamePattern: '外部' },
+    validationToggles: { ...defaultValidationToggles },
+    isShared: false,
+    isLocked: false,
+  }],
+});
+const importResult19 = importSchemesJSON(state19, newSchemeJSON, 'skip');
+assert(importResult19.success === true, '导入成功');
+assert(importResult19.importedCount === 1, '导入1个');
+assert(importResult19.skippedCount === 0, '无跳过');
+assert(importResult19.overwrittenCount === 0, '无覆盖');
+state19 = importResult19.state;
+assert(state19.importSchemes.length === 2, '方案列表有2个');
+const importedScheme = state19.importSchemes.find((s) => s.name === '外部方案A');
+assert(importedScheme !== undefined, '导入的方案存在');
+assert(importedScheme.createdById === 'user-1', '导入方案创建人为当前用户');
+assert(importedScheme.isShared === false, '导入方案默认不共享');
+assert(importedScheme.isLocked === false, '导入方案默认不锁定');
+
+console.log('\n【测试20】导入方案 - 导入JSON同名冲突（跳过）');
+const conflictJSON = JSON.stringify({
+  version: 1,
+  exportedAt: new Date().toISOString(),
+  exportedBy: '外部用户',
+  schemes: [{
+    name: '另一方案',
+    columnMappings: [{ csvColumn: '新列', targetField: 'sampleNo' }],
+    defaultBatch: { batchNoPattern: '', batchNamePattern: '' },
+    validationToggles: { ...defaultValidationToggles },
+  }],
+});
+const importResult20 = importSchemesJSON(state19, conflictJSON, 'skip');
+assert(importResult20.success === true, '导入处理完成');
+assert(importResult20.skippedCount === 1, '跳过1个同名方案');
+assert(importResult20.importedCount === 0, '无新增');
+let state20 = importResult20.state;
+const originalScheme = state20.importSchemes.find((s) => s.name === '另一方案');
+assert(originalScheme.columnMappings[0].csvColumn === '样本编号', '同名方案未被覆盖（保留原列映射）');
+
+console.log('\n【测试21】导入方案 - 导入JSON同名冲突（覆盖）');
+const importResult21 = importSchemesJSON(state19, conflictJSON, 'overwrite');
+assert(importResult21.success === true, '导入处理完成');
+assert(importResult21.overwrittenCount === 1, '覆盖1个同名方案');
+assert(importResult21.skippedCount === 0, '无跳过');
+let state21 = importResult21.state;
+const overwrittenScheme = state21.importSchemes.find((s) => s.name === '另一方案');
+assert(overwrittenScheme.columnMappings[0].csvColumn === '新列', '同名方案已被覆盖（新列映射生效）');
+
+console.log('\n【测试22】导入方案 - 最近选择持久化');
+let state22 = createSchemeInitialState();
+const { state: s22a, scheme: scheme22 } = createImportScheme(state22, '方案A');
+state22 = s22a;
+state22 = schemeReducer(state22, { type: 'SET_LAST_SELECTED_SCHEME', schemeId: scheme22.id });
+assert(state22.lastSelectedSchemeId === scheme22.id, '最近选择已记录');
+const serialized22 = JSON.stringify(state22);
+const restored22 = schemeReducer(createSchemeInitialState(), { type: 'SET_DATA', payload: JSON.parse(serialized22) });
+assert(restored22.lastSelectedSchemeId === scheme22.id, '重启后最近选择仍有效');
+assert(restored22.importSchemes.length === 1, '重启后方案仍存在');
+assert(restored22.importSchemes[0].name === '方案A', '重启后方案名称正确');
+
+console.log('\n【测试23】导入方案 - 权限边界：锁定共享方案');
+let state23 = createSchemeInitialState();
+const { state: s23, scheme: lockedScheme } = createImportScheme(state23, '锁定共享方案', {
+  isShared: true,
+  isLocked: true,
+});
+state23 = s23;
+assert(canModifyScheme(state23, lockedScheme) === true, '创建者可以修改自己的锁定方案');
+state23.currentUserId = 'user-2';
+assert(canModifyScheme(state23, lockedScheme) === false, '非创建者不能修改他人锁定的共享方案');
+const renameLocked = renameImportScheme(state23, lockedScheme.id, '尝试改名');
+assert(renameLocked.success === false, '非创建者不能重命名锁定方案');
+assert(renameLocked.error.includes('他人锁定'), '错误信息正确');
+const deleteLocked = deleteImportScheme(state23, lockedScheme.id);
+assert(deleteLocked.success === false, '非创建者不能删除锁定方案');
+const modifyLocked = modifyImportScheme(state23, lockedScheme.id, {
+  validationToggles: { ...defaultValidationToggles, skipEmptySampleNo: false },
+});
+assert(modifyLocked.success === false, '非创建者不能修改锁定方案配置');
+state23.currentUserId = 'user-1';
+const renameByOwner = renameImportScheme(state23, lockedScheme.id, '创建者改名');
+assert(renameByOwner.success === true, '创建者可以重命名自己的锁定方案');
+
+console.log('\n【测试24】导入方案 - 权限边界：锁定解锁操作');
+let state24 = createSchemeInitialState();
+const { state: s24, scheme: scheme24 } = createImportScheme(state24, '待锁定方案');
+state24 = s24;
+state24.currentUserId = 'user-2';
+const lockByOther = lockScheme(state24, scheme24.id);
+assert(lockByOther.success === false, '非创建者不能锁定方案');
+assert(lockByOther.error.includes('创建者'), '锁定错误信息正确');
+state24.currentUserId = 'user-1';
+const lockByOwner = lockScheme(state24, scheme24.id);
+assert(lockByOwner.success === true, '创建者可以锁定方案');
+state24 = lockByOwner.state;
+assert(state24.importSchemes[0].isLocked === true, '方案已标记为锁定');
+const unlockResult = unlockScheme(state24, scheme24.id);
+assert(unlockResult.success === true, '创建者可以解锁方案');
+state24 = unlockResult.state;
+assert(state24.importSchemes[0].isLocked === false, '方案已解锁');
+
+console.log('\n【测试25】导入方案 - 审计留痕完整性');
+let state25 = createSchemeInitialState();
+const { state: s25a, scheme: s25_scheme } = createImportScheme(state25, '审计测试方案');
+state25 = s25a;
+renameImportScheme(state25, s25_scheme.id, '审计测试方案-改名');
+state25 = renameImportScheme(state25, s25_scheme.id, '审计测试方案-改名').state;
+modifyImportScheme(state25, s25_scheme.id, { defaultBatch: { batchNoPattern: 'TEST', batchNamePattern: '' } });
+state25 = modifyImportScheme(state25, s25_scheme.id, { defaultBatch: { batchNoPattern: 'TEST', batchNamePattern: '' } }).state;
+const expResult = exportSchemesJSON(state25, [s25_scheme.id]);
+state25 = expResult.state;
+const schemeAuditLogs = getSchemeAuditLog(state25, s25_scheme.id);
+assert(schemeAuditLogs.length >= 3, `审计日志至少3条，实际${schemeAuditLogs.length}条`);
+const schemeActions = schemeAuditLogs.map((l) => l.action);
+assert(schemeActions.includes('create'), '审计包含创建');
+assert(schemeActions.includes('rename'), '审计包含重命名');
+assert(schemeActions.includes('modify'), '审计包含修改');
+assert(schemeActions.includes('export'), '审计包含导出');
+for (const log of schemeAuditLogs) {
+  assert(log.operatorName !== undefined, `审计日志操作人非空`);
+  assert(log.timestamp !== undefined, `审计日志时间戳非空`);
+  assert(log.schemeName !== undefined, `审计日志方案名非空`);
+}
+
+console.log('\n【测试26】导入方案 - 重启后完整复查');
+let state26 = createSchemeInitialState();
+const { state: s26a, scheme: s26_1 } = createImportScheme(state26, '重启测试A');
+state26 = s26a;
+const { state: s26b, scheme: s26_2 } = createImportScheme(state26, '重启测试B', {
+  isShared: true,
+  isLocked: true,
+});
+state26 = s26b;
+state26 = schemeReducer(state26, { type: 'SET_LAST_SELECTED_SCHEME', schemeId: s26_1.id });
+const serialized26 = JSON.stringify(state26);
+const restored26 = schemeReducer(createSchemeInitialState(), { type: 'SET_DATA', payload: JSON.parse(serialized26) });
+assert(restored26.importSchemes.length === 2, '重启后2个方案');
+assert(restored26.importSchemes.find((s) => s.name === '重启测试A') !== undefined, '重启后方案A存在');
+assert(restored26.importSchemes.find((s) => s.name === '重启测试B') !== undefined, '重启后方案B存在');
+assert(restored26.lastSelectedSchemeId === s26_1.id, '重启后最近选择方案正确');
+const restoredB = restored26.importSchemes.find((s) => s.name === '重启测试B');
+assert(restoredB.isShared === true, '重启后共享标记保留');
+assert(restoredB.isLocked === true, '重启后锁定标记保留');
+assert(restoredB.createdById === 'user-1', '重启后创建人ID保留');
+assert(restored26.schemeAuditLog.length >= 2, '重启后审计日志保留');
+
+console.log('\n【测试27】导入方案 - 导出再导回全流程');
+let state27 = createSchemeInitialState();
+const { state: s27a, scheme: s27_1 } = createImportScheme(state27, '导出再导回方案');
+state27 = s27a;
+const export27 = exportSchemesJSON(state27, [s27_1.id]);
+state27 = export27.state;
+const exportJSON = export27.json;
+state27 = schemeReducer(state27, { type: 'DELETE_IMPORT_SCHEME', schemeId: s27_1.id });
+assert(state27.importSchemes.length === 0, '删除后无方案');
+const import27 = importSchemesJSON(state27, exportJSON, 'skip');
+assert(import27.success === true, '导回成功');
+assert(import27.importedCount === 1, '导回1个');
+state27 = import27.state;
+assert(state27.importSchemes.length === 1, '导回后方案列表有1个');
+assert(state27.importSchemes[0].name === '导出再导回方案', '导回方案名称正确');
+assert(state27.importSchemes[0].columnMappings.length === s27_1.columnMappings.length, '导回列映射数量一致');
+
+console.log('\n【测试28】导入方案 - 锁定共享方案的导入覆盖保护');
+let state28 = createSchemeInitialState();
+const { state: s28a, scheme: s28_locked } = createImportScheme(state28, '受保护方案', {
+  isShared: true,
+  isLocked: true,
+});
+state28 = s28a;
+state28.currentUserId = 'user-2';
+const lockedConflictJSON = JSON.stringify({
+  version: 1,
+  exportedAt: new Date().toISOString(),
+  exportedBy: '其他人',
+  schemes: [{
+    name: '受保护方案',
+    columnMappings: [{ csvColumn: '篡改列', targetField: 'sampleNo' }],
+    defaultBatch: { batchNoPattern: '', batchNamePattern: '' },
+    validationToggles: { ...defaultValidationToggles },
+  }],
+});
+const import28 = importSchemesJSON(state28, lockedConflictJSON, 'overwrite');
+assert(import28.overwrittenCount === 0, '非创建者导入不能覆盖锁定方案');
+assert(import28.skippedCount === 1, '锁定方案被跳过');
+
+console.log('\n========== 测试结果 ==========\n');
 if (failures > 0) {
   console.log(`❌ 共 ${failures} 项失败，请修复。\n`);
   process.exit(1);
 } else {
-  console.log('✅ 全部通过，批量导入、台账、权限、持久化功能完整。\n');
+  console.log('✅ 全部通过，批量导入、台账、权限、持久化、导入方案管理功能完整。\n');
   process.exit(0);
 }
