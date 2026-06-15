@@ -3,7 +3,7 @@ import { useApp } from '../store/AppContext'
 import { STATUS_LABELS, STATUS_COLORS, SampleStatus } from '../types'
 
 function SampleList() {
-  const { state, changeSampleStatus, undoLastStatus, canReview } = useApp()
+  const { state, changeSampleStatus, undoLastStatus, canReview, canModifySample } = useApp()
   const [selectedSampleId, setSelectedSampleId] = useState<string | null>(null)
   const [showHistory, setShowHistory] = useState(false)
   const [showActionModal, setShowActionModal] = useState(false)
@@ -84,9 +84,10 @@ function SampleList() {
     }
   }
 
-  const getAvailableActions = (status: SampleStatus) => {
-    const actions: { key: string; label: string; type: typeof actionType; className: string }[] = []
-    switch (status) {
+  const getAvailableActions = (sample: { id: string; status: SampleStatus }) => {
+    const actions: { key: string; label: string; type: typeof actionType; className: string; disabled?: boolean; disabledReason?: string }[] = []
+    const canModify = canModifySample({ id: sample.id, status: sample.status } as any)
+    switch (sample.status) {
       case 'received':
         actions.push({ key: 'aliquot', label: '分装', type: 'aliquot', className: 'btn-success' })
         actions.push({ key: 'return', label: '退回', type: 'return', className: 'btn-danger' })
@@ -99,11 +100,16 @@ function SampleList() {
         if (canReview()) {
           actions.push({ key: 'reviewed', label: '复核通过', type: 'reviewed', className: 'btn-success' })
         }
-        actions.push({ key: 'return', label: '退回', type: 'return', className: 'btn-danger' })
+        actions.push({ key: 'return', label: '退回', type: 'return', className: 'btn-danger', disabled: !canModify, disabledReason: !canModify ? '普通操作员不能修改已复核通过的记录' : undefined })
         break
       case 'returned':
         break
       case 'reviewed':
+        if (canReview()) {
+          actions.push({ key: 'return', label: '退回', type: 'return', className: 'btn-danger' })
+        } else {
+          actions.push({ key: 'locked', label: '🔒 已锁定', type: 'return', className: 'btn-default', disabled: true, disabledReason: '普通操作员不能修改已复核通过的交接记录' })
+        }
         break
     }
     return actions
@@ -175,7 +181,7 @@ function SampleList() {
           <tbody>
             {filteredSamples.map((s) => {
               const batch = state.batches.find((b) => b.id === s.batchId)
-              const actions = getAvailableActions(s.status)
+              const actions = getAvailableActions(s)
               return (
                 <tr key={s.id}>
                   <td><strong>{s.sampleNo}</strong></td>
@@ -197,9 +203,19 @@ function SampleList() {
                         <button
                           key={a.key}
                           className={`btn btn-sm ${a.className}`}
+                          disabled={a.disabled}
+                          title={a.disabledReason}
                           onClick={() => {
+                            if (a.disabled) {
+                              alert(a.disabledReason || '该操作已被禁用')
+                              return
+                            }
                             setSelectedSampleId(s.id)
                             openAction(a.type)
+                          }}
+                          style={{
+                            opacity: a.disabled ? 0.6 : 1,
+                            cursor: a.disabled ? 'not-allowed' : 'pointer',
                           }}
                         >
                           {a.label}

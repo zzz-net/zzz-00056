@@ -59,9 +59,63 @@ export interface Batch {
   createdBy: string
 }
 
+export interface ImportResultDetail {
+  rowIndex: number
+  sampleNo: string
+  success: boolean
+  error?: string
+}
+
+export interface ImportResult {
+  id: string
+  batchId: string
+  timestamp: string
+  operatorId: string
+  operatorName: string
+  totalCount: number
+  successCount: number
+  failedCount: number
+  details: ImportResultDetail[]
+}
+
+export interface BatchLedgerEntry {
+  id: string
+  batchId: string
+  sampleId: string
+  sampleNo: string
+  action: string
+  operatorId: string
+  operatorName: string
+  timestamp: string
+  fromStatus: string
+  toStatus: string
+  reason?: string
+  remark?: string
+}
+
+export interface PrevalidateResult {
+  rowIndex: number
+  sampleNo: string
+  valid: boolean
+  errors: string[]
+  warnings: string[]
+  quantity?: string
+  source?: string
+}
+
+export interface PrevalidateSummary {
+  total: number
+  validCount: number
+  invalidCount: number
+  canImport: boolean
+  results: PrevalidateResult[]
+}
+
 export interface AppData {
   users: User[]
   batches: Batch[]
   samples: Sample[]
+  importResults: ImportResult[]
+  batchLedger: BatchLedgerEntry[]
   currentUserId: string | null
 }

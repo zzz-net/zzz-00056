@@ -1,9 +1,10 @@
-import { useState } from 'react'
+import { useState, useRef } from 'react'
 import { useApp } from '../store/AppContext'
-import { STATUS_LABELS, STATUS_COLORS } from '../types'
+import { STATUS_LABELS, STATUS_COLORS, PrevalidateSummary } from '../types'
 
 function SampleReceive() {
-  const { state, createBatch, addSample, getCurrentUser } = useApp()
+  const { state, createBatch, addSample, getCurrentUser, parseCSV, prevalidateImportCSV, batchImportSamples, doExportCSV } = useApp()
+  const fileInputRef = useRef<HTMLInputElement>(null)
   const [showBatchModal, setShowBatchModal] = useState(false)
   const [batchNo, setBatchNo] = useState('')
   const [batchName, setBatchName] = useState('')
@@ -14,6 +15,10 @@ function SampleReceive() {
   const [source, setSource] = useState('')
   const [errorMsg, setErrorMsg] = useState('')
   const [successMsg, setSuccessMsg] = useState('')
+
+  const [showImportModal, setShowImportModal] = useState(false)
+  const [prevalidateResult, setPrevalidateResult] = useState<PrevalidateSummary | null>(null)
+  const [importedResult, setImportedResult] = useState<{ successCount: number; failedCount: number } | null>(null)
 
   const handleCreateBatch = () => {
     if (!batchNo.trim()) {
@@ -73,6 +78,48 @@ function SampleReceive() {
     }
   }
 
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file || !selectedBatchId) return
+
+    const reader = new FileReader()
+    reader.onload = (event) => {
+      const content = event.target?.result as string
+      const rows = parseCSV(content)
+      const result = prevalidateImportCSV(selectedBatchId, rows)
+      setPrevalidateResult(result)
+      setImportedResult(null)
+    }
+    reader.readAsText(file)
+  }
+
+  const handleConfirmImport = () => {
+    if (!prevalidateResult || !selectedBatchId) return
+
+    const result = batchImportSamples(selectedBatchId, prevalidateResult.results)
+    if (result.success && result.importResult) {
+      setImportedResult({
+        successCount: result.importResult.successCount,
+        failedCount: result.importResult.failedCount,
+      })
+      setSuccessMsg(`批量导入完成：成功 ${result.importResult.successCount} 条，失败 ${result.importResult.failedCount} 条`)
+    }
+  }
+
+  const handleDownloadTemplate = () => {
+    const template = '样本编号,数量,来源\nSAMPLE-001,5,内科病房\nSAMPLE-002,3,外科病房\nSAMPLE-003,10,检验科'
+    doExportCSV(template, '批量导入模板.csv')
+  }
+
+  const handleCloseImportModal = () => {
+    setShowImportModal(false)
+    setPrevalidateResult(null)
+    setImportedResult(null)
+    if (fileInputRef.current) {
+      fileInputRef.current.value = ''
+    }
+  }
+
   const selectedBatch = state.batches.find((b) => b.id === selectedBatchId)
   const batchSamples = state.samples.filter((s) => s.batchId === selectedBatchId)
 
@@ -80,12 +127,26 @@ function SampleReceive() {
     <div>
       <div className="page-header">
         <h1 className="page-title">样本接收</h1>
-        <button
-          className="btn btn-primary"
-          onClick={() => setShowBatchModal(true)}
-        >
-          + 新建批次
-        </button>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button
+            className="btn btn-success"
+            onClick={() => {
+              if (!selectedBatchId) {
+                setErrorMsg('请先选择批次')
+                return
+              }
+              setShowImportModal(true)
+            }}
+          >
+            📥 CSV 批量导入
+          </button>
+          <button
+            className="btn btn-primary"
+            onClick={() => setShowBatchModal(true)}
+          >
+            + 新建批次
+          </button>
+        </div>
       </div>
 
       {errorMsg && <div className="alert alert-error">{errorMsg}</div>}
@@ -232,6 +293,128 @@ function SampleReceive() {
               <button className="btn btn-primary" onClick={handleCreateBatch}>
                 创建
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showImportModal && (
+        <div className="modal-overlay" onClick={handleCloseImportModal}>
+          <div className="modal" onClick={(e) => e.stopPropagation()} style={{ width: 700, maxWidth: '90vw' }}>
+            <div className="modal-header">
+              <div className="modal-title">CSV 批量导入样本</div>
+              <div className="modal-close" onClick={handleCloseImportModal}>×</div>
+            </div>
+            <div className="modal-body">
+              {!prevalidateResult ? (
+                <div>
+                  <p style={{ marginBottom: 16 }}>
+                    请选择 CSV 文件，格式：<code>样本编号,数量,来源</code>
+                  </p>
+                  <div style={{ marginBottom: 16 }}>
+                    <button className="btn btn-default" onClick={handleDownloadTemplate}>
+                      📄 下载导入模板
+                    </button>
+                  </div>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept=".csv"
+                    onChange={handleFileSelect}
+                    className="form-input"
+                  />
+                </div>
+              ) : (
+                <div>
+                  <div style={{
+                    padding: 12,
+                    borderRadius: 4,
+                    marginBottom: 16,
+                    background: prevalidateResult.canImport ? '#f6ffed' : '#fff2f0',
+                    border: `1px solid ${prevalidateResult.canImport ? '#b7eb8f' : '#ffa39e'}`,
+                  }}>
+                    <p style={{ margin: '4px 0' }}>
+                      共 <strong>{prevalidateResult.total}</strong> 条记录，
+                      <span style={{ color: '#52c41a' }}> 有效 {prevalidateResult.validCount} 条</span>，
+                      <span style={{ color: '#f5222d' }}> 无效 {prevalidateResult.invalidCount} 条</span>
+                    </p>
+                    {!prevalidateResult.canImport && (
+                      <p style={{ margin: '4px 0', color: '#f5222d' }}>
+                        没有可导入的有效记录，请修正 CSV 文件后重新选择
+                      </p>
+                    )}
+                  </div>
+
+                  <div style={{ maxHeight: 300, overflowY: 'auto', border: '1px solid #e8e8e8', borderRadius: 4 }}>
+                    <table className="table" style={{ margin: 0 }}>
+                      <thead style={{ position: 'sticky', top: 0, background: '#fafafa' }}>
+                        <tr>
+                          <th style={{ width: 60 }}>行号</th>
+                          <th>样本编号</th>
+                          <th style={{ width: 60 }}>数量</th>
+                          <th>来源</th>
+                          <th style={{ width: 80 }}>状态</th>
+                          <th>说明</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {prevalidateResult.results.map((r) => (
+                          <tr key={r.rowIndex} style={{
+                            background: r.valid ? 'transparent' : '#fff2f0',
+                          }}>
+                            <td>{r.rowIndex}</td>
+                            <td>{r.sampleNo || '-'}</td>
+                            <td>{r.quantity || '-'}</td>
+                            <td>{r.source || '-'}</td>
+                            <td>
+                              <span className="status-tag" style={{
+                                background: r.valid ? '#52c41a' : '#f5222d',
+                              }}>
+                                {r.valid ? '通过' : '失败'}
+                              </span>
+                            </td>
+                            <td style={{ color: '#f5222d', fontSize: 12 }}>
+                              {r.errors.join('；')}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  {importedResult && (
+                    <div style={{
+                      marginTop: 16,
+                      padding: 12,
+                      background: '#f6ffed',
+                      border: '1px solid #b7eb8f',
+                      borderRadius: 4,
+                    }}>
+                      <strong>✅ 导入完成！</strong> 成功 {importedResult.successCount} 条，失败 {importedResult.failedCount} 条
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+            <div className="modal-footer">
+              <button className="btn btn-default" onClick={handleCloseImportModal}>
+                {importedResult ? '完成' : '取消'}
+              </button>
+              {prevalidateResult && prevalidateResult.canImport && !importedResult && (
+                <button className="btn btn-primary" onClick={handleConfirmImport}>
+                  确认导入 {prevalidateResult.validCount} 条
+                </button>
+              )}
+              {prevalidateResult && !importedResult && (
+                <button className="btn btn-default" onClick={() => {
+                  setPrevalidateResult(null)
+                  if (fileInputRef.current) {
+                    fileInputRef.current.value = ''
+                  }
+                }}>
+                  重新选择文件
+                </button>
+              )}
             </div>
           </div>
         </div>

@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useReducer, useEffect, ReactNode, useState, useRef } from 'react'
-import { AppData, Sample, Batch, HistoryRecord, SampleStatus, User } from '../types'
+import { AppData, Sample, Batch, HistoryRecord, SampleStatus, User, ImportResult, BatchLedgerEntry, PrevalidateSummary, PrevalidateResult } from '../types'
 import { v4 as uuidv4 } from 'uuid'
 
 const STORAGE_KEY = 'lab-sample-tracker-data'
@@ -15,6 +15,8 @@ type Action =
   | { type: 'UPDATE_SAMPLE'; payload: Sample }
   | { type: 'ADD_HISTORY'; sampleId: string; history: HistoryRecord }
   | { type: 'UNDO_LAST_STATUS'; sampleId: string; history: HistoryRecord; restoreStatus: SampleStatus; clearHandover?: boolean }
+  | { type: 'ADD_IMPORT_RESULT'; payload: ImportResult }
+  | { type: 'ADD_BATCH_LEDGER_ENTRY'; payload: BatchLedgerEntry }
 
 const defaultData: AppData = {
   users: [
@@ -23,6 +25,8 @@ const defaultData: AppData = {
   ],
   batches: [],
   samples: [],
+  importResults: [],
+  batchLedger: [],
   currentUserId: 'user-1',
 }
 
@@ -69,6 +73,16 @@ function appReducer(state: AppState, action: Action): AppState {
           return newSample
         }),
       }
+    case 'ADD_IMPORT_RESULT':
+      return {
+        ...state,
+        importResults: [...state.importResults, action.payload],
+      }
+    case 'ADD_BATCH_LEDGER_ENTRY':
+      return {
+        ...state,
+        batchLedger: [...state.batchLedger, action.payload],
+      }
     default:
       return state
   }
@@ -90,9 +104,25 @@ interface AppContextType {
   ) => { success: boolean; error?: string }
   undoLastStatus: (sampleId: string) => { success: boolean; error?: string }
   canReview: () => boolean
+  canModifySample: (sample: Sample) => boolean
   exportHandoverCSV: (batchId?: string) => string
   doExportCSV: (content: string, fileName: string) => Promise<boolean>
   isElectron: boolean
+  parseCSV: (content: string) => { sampleNo: string; quantity: string; source: string }[]
+  prevalidateImportCSV: (batchId: string, csvRows: { sampleNo: string; quantity: string; source: string }[]) => PrevalidateSummary
+  batchImportSamples: (batchId: string, validatedRows: PrevalidateResult[]) => {
+    success: boolean
+    error?: string
+    importResult?: ImportResult
+    importedSampleIds?: string[]
+  }
+  exportBatchLedgerCSV: (batchId?: string) => string
+  getBatchLedgerSummary: (batchId: string) => {
+    totalSamples: number
+    totalActions: number
+    byAction: Record<string, number>
+    bySample: Record<string, number>
+  }
 }
 
 const AppContext = createContext<AppContextType | null>(null)
@@ -112,16 +142,29 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
   }, [state])
 
+  const mergeWithDefaults = (data: Partial<AppData>): AppData => {
+    return {
+      ...defaultData,
+      ...data,
+      importResults: data.importResults || [],
+      batchLedger: data.batchLedger || [],
+      samples: (data.samples || []).map((s) => ({
+        ...s,
+        history: s.history || [],
+      })),
+    }
+  }
+
   const loadData = async () => {
     try {
       if (isElectron && !fallbackToLocalStorage.current) {
         const data = await (window as any).electronAPI.getData()
-        dispatch({ type: 'SET_DATA', payload: data })
+        dispatch({ type: 'SET_DATA', payload: mergeWithDefaults(data) })
       } else {
         const stored = localStorage.getItem(STORAGE_KEY)
         if (stored) {
           const data = JSON.parse(stored)
-          dispatch({ type: 'SET_DATA', payload: data })
+          dispatch({ type: 'SET_DATA', payload: mergeWithDefaults(data) })
         } else {
           dispatch({ type: 'SET_DATA', payload: defaultData })
         }
@@ -132,7 +175,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       const stored = localStorage.getItem(STORAGE_KEY)
       if (stored) {
         const data = JSON.parse(stored)
-        dispatch({ type: 'SET_DATA', payload: data })
+        dispatch({ type: 'SET_DATA', payload: mergeWithDefaults(data) })
       } else {
         dispatch({ type: 'SET_DATA', payload: defaultData })
       }
@@ -229,12 +272,36 @@ export function AppProvider({ children }: { children: ReactNode }) {
     sample.history[0].sampleId = sample.id
 
     dispatch({ type: 'ADD_SAMPLE', payload: sample })
+
+    const ledgerEntry: BatchLedgerEntry = {
+      id: uuidv4(),
+      batchId: sample.batchId,
+      sampleId: sample.id,
+      sampleNo: sample.sampleNo,
+      action: '样本接收',
+      operatorId: state.currentUserId || '',
+      operatorName: user?.username || '未知',
+      timestamp: sample.history[0].timestamp,
+      fromStatus: '',
+      toStatus: 'received',
+      reason: '初次接收',
+    }
+    dispatch({ type: 'ADD_BATCH_LEDGER_ENTRY', payload: ledgerEntry })
+
     return { success: true, sample }
   }
 
   const canReview = (): boolean => {
     const user = getCurrentUser()
     return user?.role === 'reviewer'
+  }
+
+  const canModifySample = (sample: Sample): boolean => {
+    if (sample.status === 'reviewed') {
+      const user = getCurrentUser()
+      return user?.role === 'reviewer'
+    }
+    return true
   }
 
   const changeSampleStatus = (
@@ -246,6 +313,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
   ): { success: boolean; error?: string } => {
     const sample = state.samples.find((s) => s.id === sampleId)
     if (!sample) return { success: false, error: '样本不存在' }
+
+    if (!canModifySample(sample)) {
+      return {
+        success: false,
+        error: '普通操作员不能修改已复核通过的交接记录，请联系复核员',
+      }
+    }
 
     if (newStatus === 'reviewed' && !canReview()) {
       return { success: false, error: '普通操作员不能执行复核通过操作，请联系复核员' }
@@ -277,12 +351,37 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
 
     dispatch({ type: 'UPDATE_SAMPLE', payload: updatedSample })
+
+    const ledgerEntry: BatchLedgerEntry = {
+      id: uuidv4(),
+      batchId: sample.batchId,
+      sampleId: sample.id,
+      sampleNo: sample.sampleNo,
+      action,
+      operatorId: state.currentUserId || '',
+      operatorName: user?.username || '未知',
+      timestamp: history.timestamp,
+      fromStatus: sample.status,
+      toStatus: newStatus,
+      reason,
+      remark,
+    }
+    dispatch({ type: 'ADD_BATCH_LEDGER_ENTRY', payload: ledgerEntry })
+
     return { success: true }
   }
 
   const undoLastStatus = (sampleId: string): { success: boolean; error?: string } => {
     const sample = state.samples.find((s) => s.id === sampleId)
     if (!sample) return { success: false, error: '样本不存在' }
+
+    if (!canModifySample(sample) && sample.status !== 'returned') {
+      return {
+        success: false,
+        error: '普通操作员不能修改已复核通过的交接记录',
+      }
+    }
+
     if (sample.history.length < 2) {
       return { success: false, error: '该样本尚无状态变更记录，无法撤销' }
     }
@@ -308,6 +407,22 @@ export function AppProvider({ children }: { children: ReactNode }) {
         restoreStatus,
         clearHandover: restoreStatus === 'reviewing' || restoreStatus === 'aliquoted' || restoreStatus === 'received',
       })
+
+      const ledgerEntry: BatchLedgerEntry = {
+        id: uuidv4(),
+        batchId: sample.batchId,
+        sampleId: sample.id,
+        sampleNo: sample.sampleNo,
+        action: '撤销退回',
+        operatorId: state.currentUserId || '',
+        operatorName: user?.username || '未知',
+        timestamp: undoHistory.timestamp,
+        fromStatus: 'returned',
+        toStatus: restoreStatus,
+        reason: undoHistory.reason,
+      }
+      dispatch({ type: 'ADD_BATCH_LEDGER_ENTRY', payload: ledgerEntry })
+
       return { success: true }
     }
     return { success: false, error: '仅退回状态可撤销最近一次变更' }
@@ -338,6 +453,231 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return csvContent
   }
 
+  const parseCSV = (content: string): { sampleNo: string; quantity: string; source: string }[] => {
+    const lines = content.split('\n').filter((line) => line.trim() !== '')
+    const result: { sampleNo: string; quantity: string; source: string }[] = []
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim()
+      if (i === 0 && (line.includes('样本编号') || line.includes('sampleNo') || line.includes('SampleNo'))) {
+        continue
+      }
+      const values = line.split(',').map((v) => v.trim())
+      if (values.length >= 3) {
+        result.push({
+          sampleNo: values[0],
+          quantity: values[1],
+          source: values[2],
+        })
+      } else if (values.length === 2) {
+        result.push({
+          sampleNo: values[0],
+          quantity: values[1],
+          source: '',
+        })
+      } else if (values.length === 1) {
+        result.push({
+          sampleNo: values[0],
+          quantity: '',
+          source: '',
+        })
+      }
+    }
+    return result
+  }
+
+  const prevalidateImportCSV = (
+    batchId: string,
+    csvRows: { sampleNo: string; quantity: string; source: string }[]
+  ): PrevalidateSummary => {
+    const seenSampleNos = new Set<string>()
+    const results: PrevalidateResult[] = csvRows.map((row, idx) => {
+      const errors: string[] = []
+      const warnings: string[] = []
+      const cleanSampleNo = row.sampleNo.trim()
+
+      if (!cleanSampleNo) {
+        errors.push('样本编号不能为空')
+      }
+      if (!row.quantity || isNaN(parseInt(row.quantity)) || parseInt(row.quantity) < 1) {
+        errors.push('数量必须为大于0的数字')
+      }
+      if (!row.source.trim()) {
+        errors.push('样本来源不能为空')
+      }
+
+      if (cleanSampleNo) {
+        if (seenSampleNos.has(cleanSampleNo)) {
+          errors.push(`CSV文件内存在重复的样本编号: ${cleanSampleNo}`)
+        }
+        seenSampleNos.add(cleanSampleNo)
+
+        if (checkDuplicateSampleNo(cleanSampleNo, batchId)) {
+          errors.push(`该批次中已存在样本编号: ${cleanSampleNo}`)
+        }
+      }
+
+      return {
+        rowIndex: idx + 1,
+        sampleNo: cleanSampleNo,
+        valid: errors.length === 0,
+        errors,
+        warnings,
+        quantity: row.quantity,
+        source: row.source,
+      }
+    })
+
+    const validCount = results.filter((r) => r.valid).length
+    const invalidCount = results.filter((r) => !r.valid).length
+
+    return {
+      total: csvRows.length,
+      validCount,
+      invalidCount,
+      canImport: validCount > 0,
+      results,
+    }
+  }
+
+  const batchImportSamples = (
+    batchId: string,
+    validatedRows: PrevalidateResult[]
+  ): {
+    success: boolean
+    error?: string
+    importResult?: ImportResult
+    importedSampleIds?: string[]
+  } => {
+    const validRows = validatedRows.filter((r) => r.valid)
+    const importId = uuidv4()
+    const importedSampleIds: string[] = []
+
+    const user = getCurrentUser()
+    const importResult: ImportResult = {
+      id: importId,
+      batchId,
+      timestamp: new Date().toISOString(),
+      operatorId: state.currentUserId || '',
+      operatorName: user?.username || '未知',
+      totalCount: validatedRows.length,
+      successCount: 0,
+      failedCount: validatedRows.filter((r) => !r.valid).length,
+      details: [],
+    }
+
+    for (const row of validRows) {
+      try {
+        const result = addSample({
+          batchId,
+          sampleNo: row.sampleNo,
+          quantity: parseInt(row.quantity || '1') || 1,
+          source: row.source?.trim() || '',
+          status: 'received',
+          receivedAt: new Date().toISOString(),
+          receivedBy: user?.username || '未知',
+        })
+
+        if (result.success && result.sample) {
+          importedSampleIds.push(result.sample.id)
+          importResult.successCount++
+          importResult.details.push({
+            rowIndex: row.rowIndex,
+            sampleNo: row.sampleNo,
+            success: true,
+          })
+        } else {
+          importResult.failedCount++
+          importResult.details.push({
+            rowIndex: row.rowIndex,
+            sampleNo: row.sampleNo,
+            success: false,
+            error: result.error || '导入失败',
+          })
+        }
+      } catch (e) {
+        importResult.failedCount++
+        importResult.details.push({
+          rowIndex: row.rowIndex,
+          sampleNo: row.sampleNo,
+          success: false,
+          error: e instanceof Error ? e.message : '未知错误',
+        })
+      }
+    }
+
+    dispatch({ type: 'ADD_IMPORT_RESULT', payload: importResult })
+
+    return {
+      success: true,
+      importResult,
+      importedSampleIds,
+    }
+  }
+
+  const exportBatchLedgerCSV = (batchId?: string): string => {
+    const ledgerEntries = batchId
+      ? state.batchLedger.filter((l) => l.batchId === batchId)
+      : state.batchLedger
+
+    const sortedEntries = [...ledgerEntries].sort(
+      (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+    )
+
+    const headers = ['时间', '批次号', '样本编号', '动作', '操作人', '原状态', '新状态', '原因', '备注']
+    const STATUS_LABELS_MAP: Record<string, string> = {
+      received: '已接收',
+      aliquoted: '已分装',
+      reviewing: '待复核',
+      reviewed: '已复核通过',
+      returned: '已退回',
+    }
+    const rows = sortedEntries.map((l) => {
+      const batch = state.batches.find((b) => b.id === l.batchId)
+      return [
+        new Date(l.timestamp).toLocaleString('zh-CN'),
+        batch?.batchNo || '',
+        l.sampleNo,
+        l.action,
+        l.operatorName,
+        l.fromStatus ? STATUS_LABELS_MAP[l.fromStatus] || l.fromStatus : '无',
+        STATUS_LABELS_MAP[l.toStatus] || l.toStatus,
+        l.reason || '',
+        l.remark || '',
+      ]
+    })
+
+    return [headers.join(','), ...rows.map((r) => r.join(','))].join('\n')
+  }
+
+  const getBatchLedgerSummary = (
+    batchId: string
+  ): {
+    totalSamples: number
+    totalActions: number
+    byAction: Record<string, number>
+    bySample: Record<string, number>
+  } => {
+    const batchLedgerEntries = state.batchLedger.filter((l) => l.batchId === batchId)
+    const batchSamples = state.samples.filter((s) => s.batchId === batchId)
+    const stats: {
+      totalSamples: number
+      totalActions: number
+      byAction: Record<string, number>
+      bySample: Record<string, number>
+    } = {
+      totalSamples: batchSamples.length,
+      totalActions: batchLedgerEntries.length,
+      byAction: {},
+      bySample: {},
+    }
+    batchLedgerEntries.forEach((l) => {
+      stats.byAction[l.action] = (stats.byAction[l.action] || 0) + 1
+      stats.bySample[l.sampleNo] = (stats.bySample[l.sampleNo] || 0) + 1
+    })
+    return stats
+  }
+
   return (
     <AppContext.Provider
       value={{
@@ -350,9 +690,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
         changeSampleStatus,
         undoLastStatus,
         canReview,
+        canModifySample,
         exportHandoverCSV,
         doExportCSV,
         isElectron,
+        parseCSV,
+        prevalidateImportCSV,
+        batchImportSamples,
+        exportBatchLedgerCSV,
+        getBatchLedgerSummary,
       }}
     >
       {children}

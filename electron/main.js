@@ -12,23 +12,40 @@ function ensureDataDir() {
   }
 }
 
+const defaultData = {
+  users: [
+    { id: 'user-1', username: '操作员小王', role: 'operator' },
+    { id: 'user-2', username: '复核员老李', role: 'reviewer' },
+  ],
+  batches: [],
+  samples: [],
+  importResults: [],
+  batchLedger: [],
+  currentUserId: 'user-1',
+}
+
+function mergeWithDefaults(data) {
+  return {
+    ...defaultData,
+    ...data,
+    importResults: data.importResults || [],
+    batchLedger: data.batchLedger || [],
+    samples: (data.samples || []).map((s) => ({
+      ...s,
+      history: s.history || [],
+    })),
+  }
+}
+
 function loadData() {
   ensureDataDir()
   if (!fs.existsSync(dataFile)) {
-    const defaultData = {
-      users: [
-        { id: 'user-1', username: '操作员小王', role: 'operator' },
-        { id: 'user-2', username: '复核员老李', role: 'reviewer' },
-      ],
-      batches: [],
-      samples: [],
-      currentUserId: 'user-1',
-    }
     fs.writeFileSync(dataFile, JSON.stringify(defaultData, null, 2), 'utf-8')
     return defaultData
   }
   const raw = fs.readFileSync(dataFile, 'utf-8')
-  return JSON.parse(raw)
+  const data = JSON.parse(raw)
+  return mergeWithDefaults(data)
 }
 
 function saveData(data) {

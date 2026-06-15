@@ -26,6 +26,8 @@ function createInitialState() {
     ],
     batches: [],
     samples: [],
+    importResults: [],
+    batchLedger: [],
     currentUserId: 'user-1',
   };
 }

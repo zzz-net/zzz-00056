@@ -4,8 +4,9 @@ import SampleReceive from './pages/SampleReceive'
 import SampleList from './pages/SampleList'
 import BatchList from './pages/BatchList'
 import HandoverExport from './pages/HandoverExport'
+import BatchLedger from './pages/BatchLedger'
 
-type Page = 'receive' | 'samples' | 'batches' | 'export'
+type Page = 'receive' | 'samples' | 'batches' | 'ledger' | 'export'
 
 function App() {
   const [currentPage, setCurrentPage] = useState<Page>('receive')
@@ -20,6 +21,7 @@ function App() {
     { key: 'receive', label: '样本接收', icon: '📥' },
     { key: 'samples', label: '样本列表', icon: '📋' },
     { key: 'batches', label: '批次管理', icon: '📦' },
+    { key: 'ledger', label: '流转台账', icon: '📊' },
     { key: 'export', label: '交接导出', icon: '📤' },
   ]
 
@@ -59,6 +61,7 @@ function App() {
         {currentPage === 'receive' && <SampleReceive />}
         {currentPage === 'samples' && <SampleList />}
         {currentPage === 'batches' && <BatchList />}
+        {currentPage === 'ledger' && <BatchLedger />}
         {currentPage === 'export' && <HandoverExport />}
       </main>
     </div>
