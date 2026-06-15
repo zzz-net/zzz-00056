@@ -46,6 +46,8 @@ export interface Sample {
   status: SampleStatus
   receivedAt: string
   receivedBy: string
+  handoverBy?: string
+  handoverAt?: string
   history: HistoryRecord[]
 }
 

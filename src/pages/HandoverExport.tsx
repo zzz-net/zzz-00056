@@ -78,6 +78,8 @@ function HandoverExport() {
               <th>来源</th>
               <th>接收时间</th>
               <th>接收人</th>
+              <th>交接人</th>
+              <th>交接时间</th>
             </tr>
           </thead>
           <tbody>
@@ -91,12 +93,14 @@ function HandoverExport() {
                   <td>{s.source}</td>
                   <td>{new Date(s.receivedAt).toLocaleString('zh-CN')}</td>
                   <td>{s.receivedBy}</td>
+                  <td><strong style={{ color: '#722ed1' }}>{s.handoverBy || '-'}</strong></td>
+                  <td>{s.handoverAt ? new Date(s.handoverAt).toLocaleString('zh-CN') : '-'}</td>
                 </tr>
               )
             })}
             {filteredSamples.length === 0 && (
               <tr>
-                <td colSpan={6} style={{ textAlign: 'center', color: '#999', padding: 40 }}>
+                <td colSpan={8} style={{ textAlign: 'center', color: '#999', padding: 40 }}>
                   暂无复核通过的样本
                 </td>
               </tr>

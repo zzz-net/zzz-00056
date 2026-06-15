@@ -14,7 +14,7 @@ type Action =
   | { type: 'ADD_SAMPLE'; payload: Sample }
   | { type: 'UPDATE_SAMPLE'; payload: Sample }
   | { type: 'ADD_HISTORY'; sampleId: string; history: HistoryRecord }
-  | { type: 'UNDO_LAST_STATUS'; sampleId: string }
+  | { type: 'UNDO_LAST_STATUS'; sampleId: string; history: HistoryRecord; restoreStatus: SampleStatus; clearHandover?: boolean }
 
 const defaultData: AppData = {
   users: [
@@ -56,10 +56,17 @@ function appReducer(state: AppState, action: Action): AppState {
       return {
         ...state,
         samples: state.samples.map((s) => {
-          if (s.id !== action.sampleId || s.history.length < 2) return s
-          const newHistory = s.history.slice(0, -1)
-          const prevStatus = newHistory[newHistory.length - 1].toStatus as SampleStatus
-          return { ...s, status: prevStatus, history: newHistory }
+          if (s.id !== action.sampleId) return s
+          const newSample: Sample = {
+            ...s,
+            status: action.restoreStatus,
+            history: [...s.history, action.history],
+          }
+          if (action.clearHandover) {
+            delete newSample.handoverBy
+            delete newSample.handoverAt
+          }
+          return newSample
         }),
       }
     default:
@@ -254,6 +261,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
       history: [...sample.history, history],
     }
 
+    if (newStatus === 'reviewed') {
+      updatedSample.handoverBy = user?.username || '未知'
+      updatedSample.handoverAt = new Date().toISOString()
+    }
+
     dispatch({ type: 'UPDATE_SAMPLE', payload: updatedSample })
     return { success: true }
   }
@@ -265,7 +277,27 @@ export function AppProvider({ children }: { children: ReactNode }) {
       return { success: false, error: '该样本尚无状态变更记录，无法撤销' }
     }
     if (sample.status === 'returned') {
-      dispatch({ type: 'UNDO_LAST_STATUS', sampleId })
+      const returnHistory = sample.history[sample.history.length - 1]
+      const restoreStatus = returnHistory.fromStatus as SampleStatus
+      const user = getCurrentUser()
+      const undoHistory: HistoryRecord = {
+        id: uuidv4(),
+        sampleId,
+        action: '撤销退回',
+        operatorId: state.currentUserId || '',
+        operatorName: user?.username || '未知',
+        timestamp: new Date().toISOString(),
+        fromStatus: 'returned',
+        toStatus: restoreStatus,
+        reason: `撤销原退回操作（原退回原因：${returnHistory.reason || '未填写'}）`,
+      }
+      dispatch({
+        type: 'UNDO_LAST_STATUS',
+        sampleId,
+        history: undoHistory,
+        restoreStatus,
+        clearHandover: restoreStatus === 'reviewing' || restoreStatus === 'aliquoted' || restoreStatus === 'received',
+      })
       return { success: true }
     }
     return { success: false, error: '仅退回状态可撤销最近一次变更' }
@@ -276,7 +308,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       ? state.samples.filter((s) => s.batchId === batchId && s.status === 'reviewed')
       : state.samples.filter((s) => s.status === 'reviewed')
 
-    const headers = ['样本编号', '所属批次', '数量', '来源', '接收时间', '接收人', '状态']
+    const headers = ['样本编号', '所属批次', '数量', '来源', '接收时间', '接收人', '交接人', '交接时间', '状态']
     const rows = samples.map((s) => {
       const batch = state.batches.find((b) => b.id === s.batchId)
       return [
@@ -286,6 +318,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
         s.source,
         new Date(s.receivedAt).toLocaleString('zh-CN'),
         s.receivedBy,
+        s.handoverBy || '',
+        s.handoverAt ? new Date(s.handoverAt).toLocaleString('zh-CN') : '',
         '已复核通过',
       ]
     })

@@ -8,9 +8,9 @@
 - **样本接收**：创建批次、录入唯一编号、登记数量和来源
 - **分装管理**：对已接收样本进行分装操作
 - **提交复核**：分装完成后提交给复核员审核
-- **复核通过**：复核员审核通过后样本进入可交接状态
+- **复核通过（交接登记）**：复核员审核通过，自动记录交接人（复核员）和交接时间，样本进入可交接状态
 - **退回处理**：任意环节发现问题可退回，并记录退回原因
-- **撤销退回**：退回后可撤销最近一次状态变更
+- **撤销退回**：退回后可撤销最近一次状态变更，**保留完整退回历史记录**
 
 ### 业务规则
 - **编号唯一性**：同一批次内样本编号不可重复，重复保存会被拒绝
@@ -174,17 +174,24 @@ npm run build
 ```
 .
 ├── electron/           # Electron 主进程代码
-│   ├── main.ts         # 主进程入口
-│   └── preload.ts      # 预加载脚本
+│   ├── main.js         # 主进程入口（窗口创建、数据持久化、CSV导出）
+│   └── preload.js      # 预加载脚本（IPC 通信桥接）
 ├── src/                # React 前端代码
 │   ├── pages/          # 页面组件
+│   │   ├── SampleReceive.tsx   # 样本接收页
+│   │   ├── SampleList.tsx      # 样本列表页
+│   │   ├── BatchList.tsx       # 批次管理页
+│   │   └── HandoverExport.tsx  # 交接导出页
 │   ├── store/          # 状态管理
+│   │   └── AppContext.tsx      # 全局状态与业务逻辑
 │   ├── types.ts        # 类型定义
-│   ├── App.tsx         # 主应用
+│   ├── App.tsx         # 主应用（侧边栏导航）
 │   ├── main.tsx        # 入口文件
+│   ├── electron.d.ts   # Electron API 类型声明
 │   └── styles.css      # 全局样式
 ├── index.html          # HTML 模板
 ├── package.json
 ├── tsconfig.json
+├── tsconfig.node.json
 └── vite.config.ts
 ```
