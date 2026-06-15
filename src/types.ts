@@ -158,6 +158,18 @@ export interface SchemeAuditLogEntry {
 
 export type ConflictResolution = 'overwrite' | 'skip'
 
+export type SchemeChangeType = 'create' | 'update' | 'delete' | 'rename' | 'overwrite' | 'import' | 'lock' | 'unlock'
+
+export interface SchemeChangeEvent {
+  type: SchemeChangeType
+  schemeId: string
+  schemeName: string
+  oldName?: string
+  timestamp: string
+  detail?: string
+  affectedLastSelected?: boolean
+}
+
 export interface AppData {
   users: User[]
   batches: Batch[]
@@ -168,4 +180,5 @@ export interface AppData {
   importSchemes: ImportScheme[]
   schemeAuditLog: SchemeAuditLogEntry[]
   lastSelectedSchemeId: string | null
+  lastSchemeChange: SchemeChangeEvent | null
 }

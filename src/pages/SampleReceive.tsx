@@ -1,9 +1,9 @@
 import { useState, useRef, useEffect } from 'react'
 import { useApp } from '../store/AppContext'
-import { STATUS_LABELS, STATUS_COLORS, PrevalidateSummary, ValidationToggles } from '../types'
+import { STATUS_LABELS, STATUS_COLORS, PrevalidateSummary, ValidationToggles, SchemeChangeEvent } from '../types'
 
 function SampleReceive() {
-  const { state, createBatch, addSample, getCurrentUser, parseCSV, parseCSVWithScheme, prevalidateImportCSV, batchImportSamples, doExportCSV, setLastSelectedScheme, resolveDefaultBatch } = useApp()
+  const { state, createBatch, addSample, getCurrentUser, parseCSV, parseCSVWithScheme, prevalidateImportCSV, batchImportSamples, doExportCSV, setLastSelectedScheme, resolveDefaultBatch, clearLastSchemeChange, isLastSelectedSchemeValid } = useApp()
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [showBatchModal, setShowBatchModal] = useState(false)
   const [batchNo, setBatchNo] = useState('')
@@ -20,19 +20,89 @@ function SampleReceive() {
   const [selectedSchemeId, setSelectedSchemeId] = useState<string>(state.lastSelectedSchemeId || '')
   const [prevalidateResult, setPrevalidateResult] = useState<PrevalidateSummary | null>(null)
   const [importedResult, setImportedResult] = useState<{ successCount: number; failedCount: number } | null>(null)
-  const [schemeDegraded, setSchemeDegraded] = useState(false)
-  const [schemeOverwritten, setSchemeOverwritten] = useState(false)
+  const [schemeChangeNotice, setSchemeChangeNotice] = useState<{ type: string; message: string } | null>(null)
+  const lastProcessedChangeRef = useRef<string | null>(null)
 
   useEffect(() => {
-    if (state.lastSelectedSchemeId) {
-      const exists = state.importSchemes.find((s) => s.id === state.lastSelectedSchemeId)
-      if (!exists && state.lastSelectedSchemeId !== null) {
-        setSchemeDegraded(true)
-      } else {
-        setSchemeDegraded(false)
-      }
+    if (!state.lastSchemeChange) {
+      return
     }
-  }, [state.lastSelectedSchemeId, state.importSchemes])
+
+    const changeKey = `${state.lastSchemeChange.type}-${state.lastSchemeChange.schemeId}-${state.lastSchemeChange.timestamp}`
+    if (lastProcessedChangeRef.current === changeKey) {
+      return
+    }
+    lastProcessedChangeRef.current = changeKey
+
+    const isLastSelected = state.lastSchemeChange.affectedLastSelected
+
+    let notice: { type: string; message: string } | null = null
+
+    switch (state.lastSchemeChange.type) {
+      case 'delete':
+        if (isLastSelected) {
+          notice = {
+            type: 'warning',
+            message: `您之前选择的方案「${state.lastSchemeChange.schemeName}」已被删除，已自动切换为默认配置。`,
+          }
+        }
+        break
+      case 'rename':
+        if (isLastSelected && state.lastSchemeChange.oldName) {
+          notice = {
+            type: 'info',
+            message: `您当前选择的方案已重命名：「${state.lastSchemeChange.oldName}」→「${state.lastSchemeChange.schemeName}」`,
+          }
+        }
+        break
+      case 'overwrite':
+        if (isLastSelected) {
+          notice = {
+            type: 'warning',
+            message: `您当前选择的方案「${state.lastSchemeChange.schemeName}」已被 JSON 导入覆盖，请注意核对列映射、校验开关等配置。`,
+          }
+        }
+        break
+      case 'update':
+        if (isLastSelected) {
+          notice = {
+            type: 'info',
+            message: `您当前选择的方案「${state.lastSchemeChange.schemeName}」配置已更新。`,
+          }
+        }
+        break
+      case 'lock':
+        if (isLastSelected) {
+          notice = {
+            type: 'info',
+            message: `您当前选择的方案「${state.lastSchemeChange.schemeName}」已被锁定并共享。`,
+          }
+        }
+        break
+      case 'unlock':
+        if (isLastSelected) {
+          notice = {
+            type: 'info',
+            message: `您当前选择的方案「${state.lastSchemeChange.schemeName}」已解锁。`,
+          }
+        }
+        break
+    }
+
+    if (notice && showImportModal) {
+      setSchemeChangeNotice(notice)
+    }
+  }, [state.lastSchemeChange, showImportModal])
+
+  useEffect(() => {
+    const valid = isLastSelectedSchemeValid()
+    if (!valid && state.lastSelectedSchemeId) {
+      setSchemeChangeNotice({
+        type: 'warning',
+        message: '之前选择的导入方案已不存在，已切换为默认配置。',
+      })
+    }
+  }, [])
 
   const handleCreateBatch = () => {
     if (!batchNo.trim()) {
@@ -145,23 +215,81 @@ function SampleReceive() {
       return
     }
     const lastId = state.lastSelectedSchemeId
+    const lastChange = state.lastSchemeChange
+
+    let notice: { type: string; message: string } | null = null
+
+    if (lastChange && lastChange.affectedLastSelected) {
+      switch (lastChange.type) {
+        case 'delete':
+          notice = {
+            type: 'warning',
+            message: `您之前选择的方案「${lastChange.schemeName}」已被删除，已自动切换为默认配置。`,
+          }
+          break
+        case 'rename':
+          if (lastChange.oldName) {
+            notice = {
+              type: 'info',
+              message: `您当前选择的方案已重命名：「${lastChange.oldName}」→「${lastChange.schemeName}」`,
+            }
+          }
+          break
+        case 'overwrite':
+          notice = {
+            type: 'warning',
+            message: `您当前选择的方案「${lastChange.schemeName}」已被 JSON 导入覆盖，请注意核对列映射、校验开关等配置。`,
+          }
+          break
+        case 'update':
+          notice = {
+            type: 'info',
+            message: `您当前选择的方案「${lastChange.schemeName}」配置已更新。`,
+          }
+          break
+        case 'lock':
+          notice = {
+            type: 'info',
+            message: `您当前选择的方案「${lastChange.schemeName}」已被锁定并共享。`,
+          }
+          break
+        case 'unlock':
+          notice = {
+            type: 'info',
+            message: `您当前选择的方案「${lastChange.schemeName}」已解锁。`,
+          }
+          break
+      }
+    }
+
     if (lastId) {
       const exists = state.importSchemes.find((s) => s.id === lastId)
       if (exists) {
         setSelectedSchemeId(lastId)
-        setSchemeDegraded(false)
-        setSchemeOverwritten(false)
+        if (!notice) {
+          setSchemeChangeNotice(null)
+        }
       } else {
         setSelectedSchemeId('')
-        setSchemeDegraded(true)
-        setSchemeOverwritten(false)
+        if (!notice) {
+          notice = {
+            type: 'warning',
+            message: '之前选择的导入方案已不存在，已切换为默认配置。',
+          }
+        }
         setLastSelectedScheme(null)
       }
     } else {
       setSelectedSchemeId('')
-      setSchemeDegraded(false)
-      setSchemeOverwritten(false)
+      if (!notice) {
+        setSchemeChangeNotice(null)
+      }
     }
+
+    if (notice) {
+      setSchemeChangeNotice(notice)
+    }
+
     setPrevalidateResult(null)
     setImportedResult(null)
     setShowImportModal(true)
@@ -171,7 +299,8 @@ function SampleReceive() {
     setShowImportModal(false)
     setPrevalidateResult(null)
     setImportedResult(null)
-    setSchemeOverwritten(false)
+    setSchemeChangeNotice(null)
+    clearLastSchemeChange()
     if (selectedSchemeId) {
       const exists = state.importSchemes.find((s) => s.id === selectedSchemeId)
       if (exists) {
@@ -189,8 +318,8 @@ function SampleReceive() {
 
   const handleSchemeChange = (newSchemeId: string) => {
     setSelectedSchemeId(newSchemeId)
-    setSchemeDegraded(false)
-    setSchemeOverwritten(false)
+    setSchemeChangeNotice(null)
+    clearLastSchemeChange()
     if (prevalidateResult) {
       setPrevalidateResult(null)
       if (fileInputRef.current) {
@@ -416,14 +545,34 @@ function SampleReceive() {
             <div className="modal-body">
               {!prevalidateResult ? (
                 <div>
-                  {schemeDegraded && (
-                    <div style={{ padding: 10, background: '#fff2f0', border: '1px solid #ffa39e', borderRadius: 4, marginBottom: 12 }}>
-                      ⚠️ 之前选择的导入方案已不存在（可能已被删除），请重新选择方案或使用默认配置。
-                    </div>
-                  )}
-                  {schemeOverwritten && (
-                    <div style={{ padding: 10, background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 4, marginBottom: 12 }}>
-                      ⚠️ 当前方案配置已被其他操作更新（如 JSON 导入覆盖），请注意核对配置。
+                  {schemeChangeNotice && (
+                    <div style={{
+                      padding: '10px 14px',
+                      background: schemeChangeNotice.type === 'warning' ? '#fff2f0' : '#e6f7ff',
+                      border: `1px solid ${schemeChangeNotice.type === 'warning' ? '#ffa39e' : '#91d5ff'}`,
+                      borderRadius: 4,
+                      marginBottom: 12,
+                      fontSize: 13,
+                      display: 'flex',
+                      alignItems: 'flex-start',
+                      gap: 8,
+                    }}>
+                      <span>{schemeChangeNotice.type === 'warning' ? '⚠️' : 'ℹ️'}</span>
+                      <span style={{ flex: 1 }}>{schemeChangeNotice.message}</span>
+                      <button
+                        onClick={() => setSchemeChangeNotice(null)}
+                        style={{
+                          background: 'none',
+                          border: 'none',
+                          cursor: 'pointer',
+                          color: '#999',
+                          fontSize: 16,
+                          padding: 0,
+                          lineHeight: 1,
+                        }}
+                      >
+                        ×
+                      </button>
                     </div>
                   )}
                   {state.importSchemes.length > 0 && (

@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useReducer, useEffect, ReactNode, useState, useRef } from 'react'
-import { AppData, Sample, Batch, HistoryRecord, SampleStatus, User, ImportResult, BatchLedgerEntry, PrevalidateSummary, PrevalidateResult, ImportScheme, SchemeAuditLogEntry, SchemeAuditAction, ConflictResolution, ColumnMapping, ValidationToggles, DefaultBatchInfo } from '../types'
+import { AppData, Sample, Batch, HistoryRecord, SampleStatus, User, ImportResult, BatchLedgerEntry, PrevalidateSummary, PrevalidateResult, ImportScheme, SchemeAuditLogEntry, SchemeAuditAction, ConflictResolution, ColumnMapping, ValidationToggles, DefaultBatchInfo, SchemeChangeEvent, SchemeChangeType } from '../types'
 import { v4 as uuidv4 } from 'uuid'
 
 const STORAGE_KEY = 'lab-sample-tracker-data'
@@ -22,6 +22,8 @@ type Action =
   | { type: 'DELETE_IMPORT_SCHEME'; schemeId: string }
   | { type: 'ADD_SCHEME_AUDIT_LOG'; payload: SchemeAuditLogEntry }
   | { type: 'SET_LAST_SELECTED_SCHEME'; schemeId: string | null }
+  | { type: 'SET_LAST_SCHEME_CHANGE'; payload: SchemeChangeEvent | null }
+  | { type: 'CLEAR_LAST_SCHEME_CHANGE' }
 
 const defaultData: AppData = {
   users: [
@@ -36,6 +38,7 @@ const defaultData: AppData = {
   importSchemes: [],
   schemeAuditLog: [],
   lastSelectedSchemeId: null,
+  lastSchemeChange: null,
 }
 
 const initialState: AppState = defaultData
@@ -107,6 +110,7 @@ function appReducer(state: AppState, action: Action): AppState {
       return {
         ...state,
         importSchemes: state.importSchemes.filter((s) => s.id !== action.schemeId),
+        lastSelectedSchemeId: state.lastSelectedSchemeId === action.schemeId ? null : state.lastSelectedSchemeId,
       }
     case 'ADD_SCHEME_AUDIT_LOG':
       return {
@@ -115,6 +119,10 @@ function appReducer(state: AppState, action: Action): AppState {
       }
     case 'SET_LAST_SELECTED_SCHEME':
       return { ...state, lastSelectedSchemeId: action.schemeId }
+    case 'SET_LAST_SCHEME_CHANGE':
+      return { ...state, lastSchemeChange: action.payload }
+    case 'CLEAR_LAST_SCHEME_CHANGE':
+      return { ...state, lastSchemeChange: null }
     default:
       return state
   }
@@ -178,6 +186,8 @@ interface AppContextType {
   getSchemeAuditLog: (schemeId: string) => SchemeAuditLogEntry[]
   doExportJSON: (content: string, fileName: string) => Promise<boolean>
   resolveDefaultBatch: (pattern: string) => string
+  clearLastSchemeChange: () => void
+  isLastSelectedSchemeValid: () => boolean
 }
 
 const AppContext = createContext<AppContextType | null>(null)
@@ -198,7 +208,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, [state])
 
   const mergeWithDefaults = (data: Partial<AppData>): AppData => {
-    return {
+    const merged: AppData = {
       ...defaultData,
       ...data,
       importResults: data.importResults || [],
@@ -206,11 +216,21 @@ export function AppProvider({ children }: { children: ReactNode }) {
       importSchemes: data.importSchemes || [],
       schemeAuditLog: data.schemeAuditLog || [],
       lastSelectedSchemeId: data.lastSelectedSchemeId || null,
+      lastSchemeChange: data.lastSchemeChange || null,
       samples: (data.samples || []).map((s) => ({
         ...s,
         history: s.history || [],
       })),
     }
+
+    if (merged.lastSelectedSchemeId) {
+      const schemeExists = merged.importSchemes.some((s) => s.id === merged.lastSelectedSchemeId)
+      if (!schemeExists) {
+        merged.lastSelectedSchemeId = null
+      }
+    }
+
+    return merged
   }
 
   const loadData = async () => {
@@ -837,6 +857,31 @@ export function AppProvider({ children }: { children: ReactNode }) {
     dispatch({ type: 'ADD_SCHEME_AUDIT_LOG', payload: entry })
   }
 
+  const emitSchemeChange = (type: SchemeChangeType, schemeId: string, schemeName: string, extra?: { oldName?: string; detail?: string }) => {
+    const affectedLastSelected = state.lastSelectedSchemeId === schemeId
+    dispatch({
+      type: 'SET_LAST_SCHEME_CHANGE',
+      payload: {
+        type,
+        schemeId,
+        schemeName,
+        oldName: extra?.oldName,
+        timestamp: new Date().toISOString(),
+        detail: extra?.detail,
+        affectedLastSelected,
+      },
+    })
+  }
+
+  const clearLastSchemeChange = () => {
+    dispatch({ type: 'CLEAR_LAST_SCHEME_CHANGE' })
+  }
+
+  const isLastSelectedSchemeValid = (): boolean => {
+    if (!state.lastSelectedSchemeId) return false
+    return state.importSchemes.some((s) => s.id === state.lastSelectedSchemeId)
+  }
+
   const createImportScheme = (name: string, opts?: {
     columnMappings?: ColumnMapping[]
     defaultBatch?: DefaultBatchInfo
@@ -864,6 +909,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
     dispatch({ type: 'ADD_IMPORT_SCHEME', payload: scheme })
     addSchemeAuditLog(scheme.id, scheme.name, 'create', '创建导入方案')
+    emitSchemeChange('create', scheme.id, scheme.name, { detail: '创建导入方案' })
     return scheme
   }
 
@@ -875,6 +921,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     const updated: ImportScheme = { ...scheme, name: newName, updatedAt: new Date().toISOString() }
     dispatch({ type: 'UPDATE_IMPORT_SCHEME', payload: updated })
     addSchemeAuditLog(schemeId, newName, 'rename', `方案重命名：${oldName} → ${newName}`)
+    emitSchemeChange('rename', schemeId, newName, { oldName, detail: `方案重命名：${oldName} → ${newName}` })
     return { success: true }
   }
 
@@ -895,6 +942,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
     dispatch({ type: 'ADD_IMPORT_SCHEME', payload: copied })
     addSchemeAuditLog(copied.id, newName, 'copy', `从方案「${scheme.name}」复制`)
+    emitSchemeChange('create', copied.id, newName, { detail: `从方案「${scheme.name}」复制` })
     return { success: true, copiedScheme: copied }
   }
 
@@ -904,6 +952,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (!canModifyScheme(scheme)) return { success: false, error: '无权删除此方案（他人锁定共享方案）' }
     dispatch({ type: 'DELETE_IMPORT_SCHEME', schemeId })
     addSchemeAuditLog(schemeId, scheme.name, 'delete', `删除方案「${scheme.name}」`)
+    emitSchemeChange('delete', schemeId, scheme.name, { detail: `删除方案「${scheme.name}」` })
     return { success: true }
   }
 
@@ -914,6 +963,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     const updated: ImportScheme = { ...scheme, ...updates, updatedAt: new Date().toISOString() }
     dispatch({ type: 'UPDATE_IMPORT_SCHEME', payload: updated })
     addSchemeAuditLog(schemeId, updated.name, 'modify', '修改方案配置')
+    emitSchemeChange('update', schemeId, updated.name, { detail: '修改方案配置' })
     return { success: true }
   }
 
@@ -924,6 +974,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     const updated: ImportScheme = { ...scheme, isLocked: true, isShared: true, updatedAt: new Date().toISOString() }
     dispatch({ type: 'UPDATE_IMPORT_SCHEME', payload: updated })
     addSchemeAuditLog(schemeId, scheme.name, 'lock', '锁定共享方案')
+    emitSchemeChange('lock', schemeId, scheme.name, { detail: '锁定共享方案' })
     return { success: true }
   }
 
@@ -934,6 +985,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     const updated: ImportScheme = { ...scheme, isLocked: false, updatedAt: new Date().toISOString() }
     dispatch({ type: 'UPDATE_IMPORT_SCHEME', payload: updated })
     addSchemeAuditLog(schemeId, scheme.name, 'unlock', '解锁方案')
+    emitSchemeChange('unlock', schemeId, scheme.name, { detail: '解锁方案' })
     return { success: true }
   }
 
@@ -993,6 +1045,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
           dispatch({ type: 'UPDATE_IMPORT_SCHEME', payload: updated })
           overwrittenCount++
           addSchemeAuditLog(existingByName.id, scheme.name, 'import', `导入覆盖方案「${scheme.name}」`)
+          emitSchemeChange('overwrite', existingByName.id, scheme.name, { detail: `导入覆盖方案「${scheme.name}」` })
           continue
         }
       }
@@ -1009,6 +1062,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       dispatch({ type: 'ADD_IMPORT_SCHEME', payload: newScheme })
       importedCount++
       addSchemeAuditLog(newScheme.id, newScheme.name, 'import', `导入新方案「${newScheme.name}」`)
+      emitSchemeChange('import', newScheme.id, newScheme.name, { detail: `导入新方案「${newScheme.name}」` })
     }
 
     return { success: true, importedCount, skippedCount, overwrittenCount }
@@ -1085,6 +1139,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
         getSchemeAuditLog,
         doExportJSON,
         resolveDefaultBatch,
+        clearLastSchemeChange,
+        isLastSelectedSchemeValid,
       }}
     >
       {children}

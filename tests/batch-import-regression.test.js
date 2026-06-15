@@ -780,6 +780,7 @@ function createSchemeInitialState() {
     importSchemes: [],
     schemeAuditLog: [],
     lastSelectedSchemeId: null,
+    lastSchemeChange: null,
   };
 }
 
@@ -806,6 +807,7 @@ function schemeReducer(state, action) {
       return {
         ...state,
         importSchemes: state.importSchemes.filter((s) => s.id !== action.schemeId),
+        lastSelectedSchemeId: state.lastSelectedSchemeId === action.schemeId ? null : state.lastSelectedSchemeId,
       };
     case 'ADD_SCHEME_AUDIT_LOG':
       return {
@@ -814,11 +816,31 @@ function schemeReducer(state, action) {
       };
     case 'SET_LAST_SELECTED_SCHEME':
       return { ...state, lastSelectedSchemeId: action.schemeId };
+    case 'SET_LAST_SCHEME_CHANGE':
+      return { ...state, lastSchemeChange: action.payload };
+    case 'CLEAR_LAST_SCHEME_CHANGE':
+      return { ...state, lastSchemeChange: null };
     case 'SET_DATA':
       return action.payload;
     default:
       return state;
   }
+}
+
+function emitSchemeChange(state, type, schemeId, schemeName, extra = {}) {
+  const affectedLastSelected = state.lastSelectedSchemeId === schemeId;
+  return schemeReducer(state, {
+    type: 'SET_LAST_SCHEME_CHANGE',
+    payload: {
+      type,
+      schemeId,
+      schemeName,
+      oldName: extra.oldName,
+      timestamp: new Date().toISOString(),
+      detail: extra.detail,
+      affectedLastSelected,
+    },
+  });
 }
 
 function getSchemeAuditLog(state, schemeId) {
@@ -864,6 +886,7 @@ function createImportScheme(state, name, opts = {}) {
     detail: '创建导入方案',
   };
   newState = schemeReducer(newState, { type: 'ADD_SCHEME_AUDIT_LOG', payload: auditEntry });
+  newState = emitSchemeChange(newState, 'create', scheme.id, scheme.name, { detail: '创建导入方案' });
 
   return { state: newState, scheme };
 }
@@ -889,6 +912,7 @@ function renameImportScheme(state, schemeId, newName) {
     detail: `方案重命名：${oldName} → ${newName}`,
   };
   newState = schemeReducer(newState, { type: 'ADD_SCHEME_AUDIT_LOG', payload: auditEntry });
+  newState = emitSchemeChange(newState, 'rename', schemeId, newName, { oldName, detail: `方案重命名：${oldName} → ${newName}` });
   return { state: newState, success: true };
 }
 
@@ -919,6 +943,7 @@ function copyImportScheme(state, schemeId, newName) {
     detail: `从方案「${scheme.name}」复制`,
   };
   newState = schemeReducer(newState, { type: 'ADD_SCHEME_AUDIT_LOG', payload: auditEntry });
+  newState = emitSchemeChange(newState, 'create', copied.id, newName, { detail: `从方案「${scheme.name}」复制` });
   return { state: newState, success: true, copiedScheme: copied };
 }
 
@@ -941,9 +966,7 @@ function deleteImportScheme(state, schemeId) {
     detail: `删除方案「${scheme.name}」`,
   };
   newState = schemeReducer(newState, { type: 'ADD_SCHEME_AUDIT_LOG', payload: auditEntry });
-  if (newState.lastSelectedSchemeId === schemeId) {
-    newState = schemeReducer(newState, { type: 'SET_LAST_SELECTED_SCHEME', schemeId: null });
-  }
+  newState = emitSchemeChange(newState, 'delete', schemeId, scheme.name, { detail: `删除方案「${scheme.name}」` });
   return { state: newState, success: true };
 }
 
@@ -967,6 +990,7 @@ function modifyImportScheme(state, schemeId, updates) {
     detail: '修改方案配置',
   };
   newState = schemeReducer(newState, { type: 'ADD_SCHEME_AUDIT_LOG', payload: auditEntry });
+  newState = emitSchemeChange(newState, 'update', schemeId, updated.name, { detail: '修改方案配置' });
   return { state: newState, success: true };
 }
 
@@ -1046,6 +1070,7 @@ function importSchemesJSON(state, jsonString, conflictResolution = 'skip') {
           detail: `导入覆盖方案「${scheme.name}」`,
         };
         newState = schemeReducer(newState, { type: 'ADD_SCHEME_AUDIT_LOG', payload: auditEntry });
+        newState = emitSchemeChange(newState, 'overwrite', existingByName.id, scheme.name, { detail: `导入覆盖方案「${scheme.name}」` });
         continue;
       }
     }
@@ -1072,6 +1097,7 @@ function importSchemesJSON(state, jsonString, conflictResolution = 'skip') {
       detail: `导入新方案「${newScheme.name}」`,
     };
     newState = schemeReducer(newState, { type: 'ADD_SCHEME_AUDIT_LOG', payload: auditEntry });
+    newState = emitSchemeChange(newState, 'import', newScheme.id, newScheme.name, { detail: `导入新方案「${newScheme.name}」` });
   }
 
   return {
@@ -1103,6 +1129,7 @@ function lockScheme(state, schemeId) {
     detail: '锁定共享方案',
   };
   newState = schemeReducer(newState, { type: 'ADD_SCHEME_AUDIT_LOG', payload: auditEntry });
+  newState = emitSchemeChange(newState, 'lock', schemeId, scheme.name, { detail: '锁定共享方案' });
   return { state: newState, success: true };
 }
 
@@ -1126,6 +1153,7 @@ function unlockScheme(state, schemeId) {
     detail: '解锁方案',
   };
   newState = schemeReducer(newState, { type: 'ADD_SCHEME_AUDIT_LOG', payload: auditEntry });
+  newState = emitSchemeChange(newState, 'unlock', schemeId, scheme.name, { detail: '解锁方案' });
   return { state: newState, success: true };
 }
 
@@ -1749,6 +1777,118 @@ const preVal32 = prevalidateImportCSVWithToggles(state32, batch32.id, parsedRows
 assert(preVal32.results[0].valid === true, '第1行校验通过（skipEmptySource=false空来源不拦截）');
 assert(preVal32.results[1].valid === true, '第2行校验通过');
 assert(preVal32.results[0].sampleNo === 'C-001', '预检结果sampleNo正确');
+
+console.log('\n========== 方案变更事件（lastSchemeChange）回归测试 ==========\n');
+
+console.log('【测试33】方案变更事件 - 创建方案触发 create 事件');
+let state33 = createSchemeInitialState();
+const { state: s33a, scheme: scheme33 } = createImportScheme(state33, '事件测试方案');
+state33 = s33a;
+assert(state33.lastSchemeChange !== null, '创建方案后lastSchemeChange不为空');
+assert(state33.lastSchemeChange.type === 'create', '事件类型为create');
+assert(state33.lastSchemeChange.schemeId === scheme33.id, '事件schemeId正确');
+assert(state33.lastSchemeChange.schemeName === '事件测试方案', '事件schemeName正确');
+assert(state33.lastSchemeChange.timestamp !== undefined, '事件有时间戳');
+assert(state33.lastSchemeChange.detail !== undefined, '事件有详情');
+
+console.log('\n【测试34】方案变更事件 - 重命名方案触发 rename 事件');
+const rename34 = renameImportScheme(state33, scheme33.id, '改名后方案名');
+assert(rename34.success === true, '重命名成功');
+state33 = rename34.state;
+assert(state33.lastSchemeChange.type === 'rename', '事件类型为rename');
+assert(state33.lastSchemeChange.oldName === '事件测试方案', '事件包含oldName正确');
+assert(state33.lastSchemeChange.schemeName === '改名后方案名', '事件schemeName为新名称');
+
+console.log('\n【测试35】方案变更事件 - 修改方案触发 update 事件');
+const modify35 = modifyImportScheme(state33, scheme33.id, { defaultBatch: { batchNoPattern: 'TEST', batchNamePattern: '' } });
+assert(modify35.success === true, '修改成功');
+state33 = modify35.state;
+assert(state33.lastSchemeChange.type === 'update', '事件类型为update');
+assert(state33.lastSchemeChange.schemeId === scheme33.id, '事件schemeId正确');
+
+console.log('\n【测试36】方案变更事件 - 锁定方案触发 lock 事件');
+const lock36 = lockScheme(state33, scheme33.id);
+assert(lock36.success === true, '锁定成功');
+state33 = lock36.state;
+assert(state33.lastSchemeChange.type === 'lock', '事件类型为lock');
+
+console.log('\n【测试37】方案变更事件 - 解锁方案触发 unlock 事件');
+const unlock37 = unlockScheme(state33, scheme33.id);
+assert(unlock37.success === true, '解锁成功');
+state33 = unlock37.state;
+assert(state33.lastSchemeChange.type === 'unlock', '事件类型为unlock');
+
+console.log('\n【测试38】方案变更事件 - 删除方案触发 delete 事件');
+const delete38 = deleteImportScheme(state33, scheme33.id);
+assert(delete38.success === true, '删除成功');
+state33 = delete38.state;
+assert(state33.lastSchemeChange.type === 'delete', '事件类型为delete');
+assert(state33.lastSchemeChange.schemeId === scheme33.id, '删除事件schemeId正确');
+assert(state33.lastSchemeChange.schemeName === '改名后方案名', '删除事件schemeName正确');
+
+console.log('\n【测试39】方案变更事件 - 导入新方案触发 import 事件');
+const importJSON39 = JSON.stringify({
+  version: 1,
+  exportedAt: new Date().toISOString(),
+  exportedBy: '外部用户',
+  schemes: [{
+    name: '导入事件测试',
+    columnMappings: [{ csvColumn: '编号', targetField: 'sampleNo' }],
+    defaultBatch: { batchNoPattern: '', batchNamePattern: '' },
+    validationToggles: { ...defaultValidationToggles },
+  }],
+});
+let state39 = createSchemeInitialState();
+const import39 = importSchemesJSON(state39, importJSON39, 'skip');
+assert(import39.importedCount === 1, '导入1个新方案');
+state39 = import39.state;
+assert(state39.lastSchemeChange.type === 'import', '导入新方案触发import事件');
+assert(state39.lastSchemeChange.schemeName === '导入事件测试', '导入事件schemeName正确');
+
+console.log('\n【测试40】方案变更事件 - 导入覆盖方案触发 overwrite 事件');
+const overwriteJSON40 = JSON.stringify({
+  version: 1,
+  exportedAt: new Date().toISOString(),
+  exportedBy: '外部用户',
+  schemes: [{
+    name: '导入事件测试',
+    columnMappings: [{ csvColumn: '新列名', targetField: 'sampleNo' }],
+    defaultBatch: { batchNoPattern: '', batchNamePattern: '' },
+    validationToggles: { ...defaultValidationToggles },
+  }],
+});
+const import40 = importSchemesJSON(state39, overwriteJSON40, 'overwrite');
+assert(import40.overwrittenCount === 1, '覆盖1个方案');
+state39 = import40.state;
+assert(state39.lastSchemeChange.type === 'overwrite', '覆盖方案触发overwrite事件');
+assert(state39.lastSchemeChange.detail?.includes('覆盖'), '覆盖事件详情包含覆盖');
+
+console.log('\n【测试41】方案变更事件 - CLEAR_LAST_SCHEME_CHANGE 清空事件');
+let state41 = createSchemeInitialState();
+const { state: s41a, scheme: scheme41 } = createImportScheme(state41, '清空测试方案');
+state41 = s41a;
+assert(state41.lastSchemeChange !== null, '创建后有变更事件');
+state41 = schemeReducer(state41, { type: 'CLEAR_LAST_SCHEME_CHANGE' });
+assert(state41.lastSchemeChange === null, '清空后lastSchemeChange为null');
+
+console.log('\n【测试42】方案变更事件 - 重启后 lastSchemeChange 持久化');
+let state42 = createSchemeInitialState();
+const { state: s42a, scheme: scheme42 } = createImportScheme(state42, '持久化测试方案');
+state42 = s42a;
+const serialized42 = JSON.stringify(state42);
+const restored42 = schemeReducer(createSchemeInitialState(), { type: 'SET_DATA', payload: JSON.parse(serialized42) });
+assert(restored42.lastSchemeChange !== null, '重启后lastSchemeChange仍存在');
+assert(restored42.lastSchemeChange.type === 'create', '重启后事件类型正确');
+assert(restored42.lastSchemeChange.schemeId === scheme42.id, '重启后schemeId正确');
+
+console.log('\n【测试43】方案删除后 lastSelectedSchemeId 同步清空（reducer 层验证）');
+let state43 = createSchemeInitialState();
+const { state: s43a, scheme: scheme43 } = createImportScheme(state43, '待删方案2');
+state43 = s43a;
+state43 = schemeReducer(state43, { type: 'SET_LAST_SELECTED_SCHEME', schemeId: scheme43.id });
+assert(state43.lastSelectedSchemeId === scheme43.id, 'lastSelectedSchemeId已设置');
+state43 = schemeReducer(state43, { type: 'DELETE_IMPORT_SCHEME', schemeId: scheme43.id });
+assert(state43.lastSelectedSchemeId === null, '删除方案后lastSelectedSchemeId被reducer清空');
 
 console.log('\n========== 测试结果 ==========\n');
 if (failures > 0) {

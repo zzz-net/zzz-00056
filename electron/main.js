@@ -25,10 +25,11 @@ const defaultData = {
   importSchemes: [],
   schemeAuditLog: [],
   lastSelectedSchemeId: null,
+  lastSchemeChange: null,
 }
 
 function mergeWithDefaults(data) {
-  return {
+  const merged = {
     ...defaultData,
     ...data,
     importResults: data.importResults || [],
@@ -36,11 +37,21 @@ function mergeWithDefaults(data) {
     importSchemes: data.importSchemes || [],
     schemeAuditLog: data.schemeAuditLog || [],
     lastSelectedSchemeId: data.lastSelectedSchemeId || null,
+    lastSchemeChange: data.lastSchemeChange || null,
     samples: (data.samples || []).map((s) => ({
       ...s,
       history: s.history || [],
     })),
   }
+
+  if (merged.lastSelectedSchemeId) {
+    const schemeExists = merged.importSchemes.some((s) => s.id === merged.lastSelectedSchemeId)
+    if (!schemeExists) {
+      merged.lastSelectedSchemeId = null
+    }
+  }
+
+  return merged
 }
 
 function loadData() {
