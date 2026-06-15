@@ -550,6 +550,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     importedSampleIds?: string[]
   } => {
     const validRows = validatedRows.filter((r) => r.valid)
+    const invalidRows = validatedRows.filter((r) => !r.valid)
     const importId = uuidv4()
     const importedSampleIds: string[] = []
 
@@ -562,8 +563,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
       operatorName: user?.username || '未知',
       totalCount: validatedRows.length,
       successCount: 0,
-      failedCount: validatedRows.filter((r) => !r.valid).length,
+      failedCount: 0,
       details: [],
+    }
+
+    for (const row of invalidRows) {
+      importResult.failedCount++
+      importResult.details.push({
+        rowIndex: row.rowIndex,
+        sampleNo: row.sampleNo,
+        success: false,
+        error: row.errors[0] || '预检失败',
+      })
     }
 
     for (const row of validRows) {

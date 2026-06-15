@@ -152,6 +152,12 @@ function SampleReceive() {
       {errorMsg && <div className="alert alert-error">{errorMsg}</div>}
       {successMsg && <div className="alert alert-success">{successMsg}</div>}
 
+      <div style={{ marginBottom: 16, padding: 12, background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 4 }}>
+        <span style={{ fontSize: 14, color: '#d48806' }}>
+          💡 <strong>提示：</strong>批量导入后，可在左侧菜单「📋 导入历史」中查看所有导入记录和逐条明细，关闭应用重启后仍可追溯。
+        </span>
+      </div>
+
       <div className="card">
         <div className="form-group">
           <label className="form-label">选择批次</label>

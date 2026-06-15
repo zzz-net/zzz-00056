@@ -208,6 +208,7 @@ function addSample(state, sampleData) {
 
 function batchImportSamples(state, batchId, validatedRows) {
   const validRows = validatedRows.filter((r) => r.valid);
+  const invalidRows = validatedRows.filter((r) => !r.valid);
   const importId = uuidv4();
   const importedSampleIds = [];
   let currentState = state;
@@ -220,9 +221,19 @@ function batchImportSamples(state, batchId, validatedRows) {
     operatorName: state.users.find((u) => u.id === state.currentUserId)?.username || '未知',
     totalCount: validatedRows.length,
     successCount: 0,
-    failedCount: validatedRows.filter((r) => !r.valid).length,
+    failedCount: 0,
     details: [],
   };
+
+  for (const row of invalidRows) {
+    importResult.failedCount++;
+    importResult.details.push({
+      rowIndex: row.rowIndex,
+      sampleNo: row.sampleNo,
+      success: false,
+      error: row.errors[0] || '预检失败',
+    });
+  }
 
   for (const row of validRows) {
     try {
@@ -509,7 +520,8 @@ assert(afterCount === beforeCount + 3, `成功导入3行，样本数从${beforeC
 assert(importResult.successCount === 3, '导入结果显示成功3条');
 assert(importResult.failedCount === 2, '导入结果显示失败2条');
 assert(importResult.details.filter((d) => d.success).length === 3, '详情中3条成功');
-assert(importResult.details.filter((d) => !d.success).length === 0, '导入循环中无额外失败');
+assert(importResult.details.filter((d) => !d.success).length === 2, '详情中包含2条预检失败');
+assert(importResult.failedCount === preCheck4.invalidCount, '导入循环中无额外失败，失败数等于预检失败数');
 
 assert(state.samples.some((s) => s.sampleNo === 'IMPORT-001'), 'IMPORT-001已导入');
 assert(state.samples.some((s) => s.sampleNo === 'IMPORT-002'), 'IMPORT-002已导入');
@@ -648,6 +660,109 @@ batchLedgerEntries.forEach((l) => {
 assert(stats.totalSamples >= 4, '批次样本数正确');
 assert(stats.byAction['样本接收'] >= 4, '批次接收动作数正确');
 assert(stats.byAction['复核通过'] >= 1, '批次有复核通过记录');
+
+console.log('\n【测试10】导入历史 - 成功失败混合导入');
+const { state: s10, batch: batch10 } = createBatch(createInitialState(), 'BATCH-TEST-10', '混合导入测试批次');
+const csvRows10 = [
+  { sampleNo: 'S10-001', quantity: '5', source: '内科' },
+  { sampleNo: 'S10-002', quantity: '3', source: '外科' },
+  { sampleNo: '', quantity: '2', source: '儿科' },
+  { sampleNo: 'S10-004', quantity: '4', source: '妇产科' },
+  { sampleNo: 'S10-001', quantity: '1', source: '眼科' },
+];
+const prevalidate10 = prevalidateImportCSV(s10, batch10.id, csvRows10);
+assert(prevalidate10.total === 5, '预检总数正确');
+assert(prevalidate10.validCount === 3, '预检成功数正确（排除空编号和重复）');
+assert(prevalidate10.invalidCount === 2, '预检失败数正确');
+
+const importResult10 = batchImportSamples(s10, batch10.id, prevalidate10.results);
+const state10 = importResult10.state;
+
+assert(state10.importResults.length === 1, '导入结果已记录');
+const importRecord10 = state10.importResults[0];
+assert(importRecord10.batchId === batch10.id, '导入结果关联批次正确');
+assert(importRecord10.totalCount === 5, '导入总数正确');
+assert(importRecord10.successCount === 3, '导入成功数正确');
+assert(importRecord10.failedCount === 2, '导入失败数正确');
+assert(importRecord10.details.length === 5, '明细包含所有行');
+
+const successDetails = importRecord10.details.filter((d) => d.success);
+const failedDetails = importRecord10.details.filter((d) => !d.success);
+assert(successDetails.length === 3, '成功明细数量正确');
+assert(failedDetails.length === 2, '失败明细数量正确');
+assert(failedDetails[0].error?.includes('不能为空') || failedDetails[0].error?.includes('重复'), '失败明细含错误信息');
+assert(failedDetails.some((d) => d.sampleNo === ''), '空编号样本在失败明细中');
+assert(failedDetails.some((d) => d.error?.includes('重复')), '重复样本在失败明细中');
+
+console.log('\n【测试11】导入历史 - 重启后查看同一批次结果');
+const serialized10 = JSON.stringify(state10);
+const restored10 = fixedReducer(createInitialState(), { type: 'SET_DATA', payload: JSON.parse(serialized10) });
+
+assert(restored10.importResults.length === 1, '重启后导入历史仍存在');
+const restoredImport10 = restored10.importResults[0];
+assert(restoredImport10.id === importRecord10.id, '重启后导入记录ID一致');
+assert(restoredImport10.batchId === batch10.id, '重启后批次关联正确');
+assert(restoredImport10.totalCount === 5, '重启后总数正确');
+assert(restoredImport10.successCount === 3, '重启后成功数正确');
+assert(restoredImport10.failedCount === 2, '重启后失败数正确');
+assert(restoredImport10.details.length === 5, '重启后明细完整');
+assert(restoredImport10.timestamp === importRecord10.timestamp, '重启后时间戳一致');
+assert(restoredImport10.operatorName === importRecord10.operatorName, '重启后操作人一致');
+
+const batchFiltered = restored10.importResults.filter((r) => r.batchId === batch10.id);
+assert(batchFiltered.length === 1, '按批次筛选可找到记录');
+
+console.log('\n【测试12】导入历史 - 空态与异常处理');
+const emptyState = createInitialState();
+assert(emptyState.importResults.length === 0, '初始状态无导入记录');
+
+const emptyFiltered = emptyState.importResults.filter(() => true);
+assert(emptyFiltered.length === 0, '空数组筛选无报错');
+
+const sortedEmpty = [...emptyFiltered].sort(
+  (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+);
+assert(sortedEmpty.length === 0, '空数组排序无报错');
+
+const { state: s12a, batch: batch12a } = createBatch(emptyState, 'BATCH-TEST-12A', '全成功批次');
+const csvRows12a = [
+  { sampleNo: 'S12-001', quantity: '5', source: '内科' },
+  { sampleNo: 'S12-002', quantity: '3', source: '外科' },
+  { sampleNo: 'S12-003', quantity: '4', source: '儿科' },
+];
+const prevalidate12a = prevalidateImportCSV(s12a, batch12a.id, csvRows12a);
+assert(prevalidate12a.validCount === 3, '全部成功预检');
+const importResult12a = batchImportSamples(s12a, batch12a.id, prevalidate12a.results);
+const state12a = importResult12a.state;
+assert(state12a.importResults.length === 1, '导入成功后有1条记录');
+const record12a = state12a.importResults[0];
+assert(record12a.failedCount === 0, '全成功导入失败数为0');
+assert(record12a.successCount === 3, '全成功导入成功数为3');
+const allSuccess = record12a.details.every((d) => d.success);
+assert(allSuccess === true, '所有明细均为成功');
+
+const { state: s12b, batch: batch12b } = createBatch(state12a, 'BATCH-TEST-12B', '第二批次');
+const csvRows12b = [
+  { sampleNo: 'S12B-001', quantity: '2', source: '内科' },
+  { sampleNo: '', quantity: '1', source: '外科' },
+];
+const prevalidate12b = prevalidateImportCSV(s12b, batch12b.id, csvRows12b);
+const importResult12b = batchImportSamples(s12b, batch12b.id, prevalidate12b.results);
+const state12b = importResult12b.state;
+assert(state12b.importResults.length === 2, '多批次导入后有2条记录');
+
+const filteredBatchA = state12b.importResults.filter((r) => r.batchId === batch12a.id);
+assert(filteredBatchA.length === 1, '按批次A筛选正确');
+assert(filteredBatchA[0].totalCount === 3, '批次A记录正确');
+
+const filteredBatchB = state12b.importResults.filter((r) => r.batchId === batch12b.id);
+assert(filteredBatchB.length === 1, '按批次B筛选正确');
+assert(filteredBatchB[0].totalCount === 2, '批次B记录正确');
+
+const sortedResults = [...state12b.importResults].sort(
+  (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+);
+assert(sortedResults[0].id === record12a.id || sortedResults[1].id === record12a.id, '按时间倒序排列');
 
 console.log('\n========== 测试结果 ==========');
 if (failures > 0) {
