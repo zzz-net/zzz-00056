@@ -107,7 +107,6 @@ function appReducer(state: AppState, action: Action): AppState {
       return {
         ...state,
         importSchemes: state.importSchemes.filter((s) => s.id !== action.schemeId),
-        lastSelectedSchemeId: state.lastSelectedSchemeId === action.schemeId ? null : state.lastSelectedSchemeId,
       }
     case 'ADD_SCHEME_AUDIT_LOG':
       return {
@@ -142,7 +141,8 @@ interface AppContextType {
   doExportCSV: (content: string, fileName: string) => Promise<boolean>
   isElectron: boolean
   parseCSV: (content: string) => { sampleNo: string; quantity: string; source: string }[]
-  prevalidateImportCSV: (batchId: string, csvRows: { sampleNo: string; quantity: string; source: string }[]) => PrevalidateSummary
+  parseCSVWithScheme: (content: string, columnMappings: ColumnMapping[]) => { sampleNo: string; quantity: string; source: string }[]
+  prevalidateImportCSV: (batchId: string, csvRows: { sampleNo: string; quantity: string; source: string }[], validationToggles?: ValidationToggles) => PrevalidateSummary
   batchImportSamples: (batchId: string, validatedRows: PrevalidateResult[]) => {
     success: boolean
     error?: string
@@ -177,6 +177,7 @@ interface AppContextType {
   setLastSelectedScheme: (schemeId: string | null) => void
   getSchemeAuditLog: (schemeId: string) => SchemeAuditLogEntry[]
   doExportJSON: (content: string, fileName: string) => Promise<boolean>
+  resolveDefaultBatch: (pattern: string) => string
 }
 
 const AppContext = createContext<AppContextType | null>(null)
@@ -543,33 +544,93 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return result
   }
 
+  const parseCSVWithScheme = (content: string, columnMappings: ColumnMapping[]): { sampleNo: string; quantity: string; source: string }[] => {
+    const lines = content.split('\n').filter((line) => line.trim() !== '')
+    if (lines.length === 0) return []
+
+    const firstLineCells = lines[0].split(',').map((v) => v.trim())
+
+    const colIndexMap: Record<string, number> = {}
+    let headerFound = false
+    for (const mapping of columnMappings) {
+      const idx = firstLineCells.findIndex((h) => h === mapping.csvColumn)
+      if (idx !== -1) {
+        colIndexMap[mapping.targetField] = idx
+        headerFound = true
+      }
+    }
+
+    if (!headerFound) {
+      const defaultHeaders = ['样本编号', 'sampleNo', 'SampleNo', '编号']
+      for (let i = 0; i < firstLineCells.length; i++) {
+        if (defaultHeaders.some((h) => firstLineCells[i].includes(h))) {
+          headerFound = true
+          break
+        }
+      }
+    }
+
+    const startIdx = headerFound ? 1 : 0
+    const result: { sampleNo: string; quantity: string; source: string }[] = []
+
+    for (let i = startIdx; i < lines.length; i++) {
+      const values = lines[i].split(',').map((v) => v.trim())
+
+      if (headerFound && Object.keys(colIndexMap).length > 0) {
+        result.push({
+          sampleNo: colIndexMap['sampleNo'] !== undefined ? (values[colIndexMap['sampleNo']] || '') : (values[0] || ''),
+          quantity: colIndexMap['quantity'] !== undefined ? (values[colIndexMap['quantity']] || '') : (values[1] || ''),
+          source: colIndexMap['source'] !== undefined ? (values[colIndexMap['source']] || '') : (values[2] || ''),
+        })
+      } else {
+        if (values.length >= 3) {
+          result.push({ sampleNo: values[0], quantity: values[1], source: values[2] })
+        } else if (values.length === 2) {
+          result.push({ sampleNo: values[0], quantity: values[1], source: '' })
+        } else if (values.length === 1) {
+          result.push({ sampleNo: values[0], quantity: '', source: '' })
+        }
+      }
+    }
+
+    return result
+  }
+
   const prevalidateImportCSV = (
     batchId: string,
-    csvRows: { sampleNo: string; quantity: string; source: string }[]
+    csvRows: { sampleNo: string; quantity: string; source: string }[],
+    validationToggles?: ValidationToggles
   ): PrevalidateSummary => {
+    const toggles = validationToggles || {
+      skipEmptySampleNo: true,
+      skipDuplicateInFile: true,
+      skipDuplicateInBatch: true,
+      skipInvalidQuantity: true,
+      skipEmptySource: true,
+    }
     const seenSampleNos = new Set<string>()
     const results: PrevalidateResult[] = csvRows.map((row, idx) => {
       const errors: string[] = []
       const warnings: string[] = []
       const cleanSampleNo = row.sampleNo.trim()
 
-      if (!cleanSampleNo) {
+      if (!toggles.skipEmptySampleNo && !cleanSampleNo) {
         errors.push('样本编号不能为空')
       }
-      if (!row.quantity || isNaN(parseInt(row.quantity)) || parseInt(row.quantity) < 1) {
+      if (!toggles.skipInvalidQuantity && (!row.quantity || isNaN(parseInt(row.quantity)) || parseInt(row.quantity) < 1)) {
         errors.push('数量必须为大于0的数字')
       }
-      if (!row.source.trim()) {
+      if (!toggles.skipEmptySource && !row.source.trim()) {
         errors.push('样本来源不能为空')
       }
 
       if (cleanSampleNo) {
-        if (seenSampleNos.has(cleanSampleNo)) {
+        if (!toggles.skipDuplicateInFile && seenSampleNos.has(cleanSampleNo)) {
           errors.push(`CSV文件内存在重复的样本编号: ${cleanSampleNo}`)
         }
         seenSampleNos.add(cleanSampleNo)
 
-        if (checkDuplicateSampleNo(cleanSampleNo, batchId)) {
+        if (!toggles.skipDuplicateInBatch && checkDuplicateSampleNo(cleanSampleNo, batchId)) {
           errors.push(`该批次中已存在样本编号: ${cleanSampleNo}`)
         }
       }
@@ -923,6 +984,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
           const updated: ImportScheme = {
             ...scheme,
             id: existingByName.id,
+            createdById: existingByName.createdById,
+            createdBy: existingByName.createdBy,
+            isLocked: existingByName.isLocked,
+            isShared: existingByName.isShared,
             updatedAt: new Date().toISOString(),
           }
           dispatch({ type: 'UPDATE_IMPORT_SCHEME', payload: updated })
@@ -978,6 +1043,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
   }
 
+  const resolveDefaultBatch = (pattern: string): string => {
+    return pattern
+      .replace('{DATE}', new Date().toISOString().slice(0, 10).replace(/-/g, ''))
+      .replace('{SEQ}', String(state.batches.length + 1).padStart(3, '0'))
+  }
+
   return (
     <AppContext.Provider
       value={{
@@ -995,6 +1066,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         doExportCSV,
         isElectron,
         parseCSV,
+        parseCSVWithScheme,
         prevalidateImportCSV,
         batchImportSamples,
         exportBatchLedgerCSV,
@@ -1012,6 +1084,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         setLastSelectedScheme,
         getSchemeAuditLog,
         doExportJSON,
+        resolveDefaultBatch,
       }}
     >
       {children}

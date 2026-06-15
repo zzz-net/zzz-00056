@@ -1026,6 +1026,10 @@ function importSchemesJSON(state, jsonString, conflictResolution = 'skip') {
         const updated = {
           ...scheme,
           id: existingByName.id,
+          createdById: existingByName.createdById,
+          createdBy: existingByName.createdBy,
+          isLocked: existingByName.isLocked,
+          isShared: existingByName.isShared,
           updatedBy: user?.username || '未知',
           updatedAt: new Date().toISOString(),
         };
@@ -1403,11 +1407,354 @@ const import28 = importSchemesJSON(state28, lockedConflictJSON, 'overwrite');
 assert(import28.overwrittenCount === 0, '非创建者导入不能覆盖锁定方案');
 assert(import28.skippedCount === 1, '锁定方案被跳过');
 
+console.log('\n========== 方案列映射、校验开关、默认批次、完整链路 回归测试 ==========\n');
+
+function parseCSVWithScheme(content, columnMappings) {
+  const lines = content.split('\n').filter((line) => line.trim() !== '');
+  if (lines.length === 0) return [];
+
+  const firstLineCells = lines[0].split(',').map((v) => v.trim());
+
+  const colIndexMap = {};
+  let headerFound = false;
+  for (const mapping of columnMappings) {
+    const idx = firstLineCells.findIndex((h) => h === mapping.csvColumn);
+    if (idx !== -1) {
+      colIndexMap[mapping.targetField] = idx;
+      headerFound = true;
+    }
+  }
+
+  if (!headerFound) {
+    const defaultHeaders = ['样本编号', 'sampleNo', 'SampleNo', '编号'];
+    for (let i = 0; i < firstLineCells.length; i++) {
+      if (defaultHeaders.some((h) => firstLineCells[i].includes(h))) {
+        headerFound = true;
+        break;
+      }
+    }
+  }
+
+  const startIdx = headerFound ? 1 : 0;
+  const result = [];
+
+  for (let i = startIdx; i < lines.length; i++) {
+    const values = lines[i].split(',').map((v) => v.trim());
+
+    if (headerFound && Object.keys(colIndexMap).length > 0) {
+      result.push({
+        sampleNo: colIndexMap['sampleNo'] !== undefined ? (values[colIndexMap['sampleNo']] || '') : (values[0] || ''),
+        quantity: colIndexMap['quantity'] !== undefined ? (values[colIndexMap['quantity']] || '') : (values[1] || ''),
+        source: colIndexMap['source'] !== undefined ? (values[colIndexMap['source']] || '') : (values[2] || ''),
+      });
+    } else {
+      if (values.length >= 3) {
+        result.push({ sampleNo: values[0], quantity: values[1], source: values[2] });
+      } else if (values.length === 2) {
+        result.push({ sampleNo: values[0], quantity: values[1], source: '' });
+      } else if (values.length === 1) {
+        result.push({ sampleNo: values[0], quantity: '', source: '' });
+      }
+    }
+  }
+
+  return result;
+}
+
+function prevalidateImportCSVWithToggles(state, batchId, csvRows, validationToggles) {
+  const toggles = validationToggles || {
+    skipEmptySampleNo: true,
+    skipDuplicateInFile: true,
+    skipDuplicateInBatch: true,
+    skipInvalidQuantity: true,
+    skipEmptySource: true,
+  };
+  const seenSampleNos = new Set();
+  const results = csvRows.map((row, idx) => {
+    const errors = [];
+    const warnings = [];
+    const cleanSampleNo = row.sampleNo.trim();
+
+    if (toggles.skipEmptySampleNo && !cleanSampleNo) {
+      errors.push('样本编号不能为空');
+    }
+    if (toggles.skipInvalidQuantity && (!row.quantity || isNaN(parseInt(row.quantity)) || parseInt(row.quantity) < 1)) {
+      errors.push('数量必须为大于0的数字');
+    }
+    if (toggles.skipEmptySource && !row.source.trim()) {
+      errors.push('样本来源不能为空');
+    }
+
+    if (cleanSampleNo) {
+      if (toggles.skipDuplicateInFile && seenSampleNos.has(cleanSampleNo)) {
+        errors.push(`CSV文件内存在重复的样本编号: ${cleanSampleNo}`);
+      }
+      seenSampleNos.add(cleanSampleNo);
+
+      if (toggles.skipDuplicateInBatch && checkDuplicateSampleNo(state, cleanSampleNo, batchId)) {
+        errors.push(`该批次中已存在样本编号: ${cleanSampleNo}`);
+      }
+    }
+
+    return {
+      rowIndex: idx + 1,
+      sampleNo: cleanSampleNo,
+      valid: errors.length === 0,
+      errors,
+      warnings,
+      quantity: row.quantity,
+      source: row.source,
+    };
+  });
+
+  const validCount = results.filter((r) => r.valid).length;
+  const invalidCount = results.filter((r) => !r.valid).length;
+
+  return {
+    total: csvRows.length,
+    validCount,
+    invalidCount,
+    canImport: validCount > 0,
+    results,
+  };
+}
+
+function resolveDefaultBatch(pattern, batchCount) {
+  return pattern
+    .replace('{DATE}', new Date().toISOString().slice(0, 10).replace(/-/g, ''))
+    .replace('{SEQ}', String((batchCount || 0) + 1).padStart(3, '0'));
+}
+
+console.log('【测试23】方案列映射 CSV 解析 - 自定义列头');
+const csv23 = "ID,Qty,Src\nS-001,5,内科\nS-002,3,外科";
+const mappings23 = [
+  { csvColumn: 'ID', targetField: 'sampleNo' },
+  { csvColumn: 'Qty', targetField: 'quantity' },
+  { csvColumn: 'Src', targetField: 'source' },
+];
+const rows23 = parseCSVWithScheme(csv23, mappings23);
+assert(rows23.length === 2, '解析出2行数据（表头不被当成数据行）');
+assert(rows23[0].sampleNo === 'S-001', 'S-001的sampleNo正确');
+assert(rows23[0].quantity === '5', 'S-001的quantity正确');
+assert(rows23[0].source === '内科', 'S-001的source正确');
+assert(rows23[1].sampleNo === 'S-002', 'S-002的sampleNo正确');
+assert(rows23[1].quantity === '3', 'S-002的quantity正确');
+assert(rows23[1].source === '外科', 'S-002的source正确');
+
+console.log('\n【测试24】表头识别 - 自定义列头不被当成数据行');
+const csv24 = "编号,数量,来源\nS-001,5,内科";
+const mappings24 = [
+  { csvColumn: '编号', targetField: 'sampleNo' },
+  { csvColumn: '数量', targetField: 'quantity' },
+  { csvColumn: '来源', targetField: 'source' },
+];
+const rows24 = parseCSVWithScheme(csv24, mappings24);
+assert(rows24.length === 1, '只有1行数据，表头不被当成数据行');
+assert(rows24[0].sampleNo === 'S-001', '表头"编号"不被当成样本编号');
+assert(rows24[0].quantity === '5', '列映射quantity正确');
+assert(rows24[0].source === '内科', '列映射source正确');
+
+console.log('\n【测试25】校验开关 - skipEmptySource=false 时空来源不拦截');
+let state25x = createSchemeInitialState();
+const { state: s25x, batch: batch25 } = createBatch(state25x, 'BATCH-25', '测试批次25');
+state25x = s25x;
+const toggles25 = {
+  ...defaultValidationToggles,
+  skipEmptySource: false,
+};
+const row25a = { sampleNo: 'S-001', quantity: '5', source: '' };
+const preVal25a = prevalidateImportCSVWithToggles(state25x, batch25.id, [row25a], toggles25);
+assert(preVal25a.results[0].valid === true, '空来源不拦截，该行valid=true');
+assert(!preVal25a.results[0].errors.some((e) => e.includes('来源')), '不因空来源报错');
+const row25b = { sampleNo: 'S-002', quantity: '', source: '' };
+const preVal25b = prevalidateImportCSVWithToggles(state25x, batch25.id, [row25b], toggles25);
+assert(preVal25b.results[0].valid === false, '无效数量仍报错');
+assert(preVal25b.results[0].errors.some((e) => e.includes('数量')), '因无效数量报错');
+assert(!preVal25b.results[0].errors.some((e) => e.includes('来源')), '不因空来源报错');
+
+console.log('\n【测试26】校验开关 - skipDuplicateInFile=false 时文件内重复不拦截');
+let state26x = createSchemeInitialState();
+const { state: s26x, batch: batch26 } = createBatch(state26x, 'BATCH-26', '测试批次26');
+state26x = s26x;
+const toggles26 = {
+  ...defaultValidationToggles,
+  skipDuplicateInFile: false,
+};
+const rows26 = [
+  { sampleNo: 'S-001', quantity: '5', source: '内科' },
+  { sampleNo: 'S-001', quantity: '3', source: '外科' },
+];
+const preVal26 = prevalidateImportCSVWithToggles(state26x, batch26.id, rows26, toggles26);
+assert(preVal26.results[0].valid === true, 'skipDuplicateInFile=false时第一行valid');
+assert(preVal26.results[1].valid === true, 'skipDuplicateInFile=false时第二行也valid（文件内重复不拦截）');
+
+console.log('\n【测试27】校验开关 - skipEmptySampleNo=false 时空编号不拦截');
+let state27x = createSchemeInitialState();
+const { state: s27x, batch: batch27 } = createBatch(state27x, 'BATCH-27', '测试批次27');
+state27x = s27x;
+const toggles27 = {
+  ...defaultValidationToggles,
+  skipEmptySampleNo: false,
+};
+const rows27 = [
+  { sampleNo: '', quantity: '5', source: '内科' },
+];
+const preVal27 = prevalidateImportCSVWithToggles(state27x, batch27.id, rows27, toggles27);
+assert(preVal27.results[0].valid === true, 'skipEmptySampleNo=false时空编号行valid=true');
+
+console.log('\n【测试28】默认批次模式解析 resolveDefaultBatch');
+const todayStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+const result28a = resolveDefaultBatch('{DATE}', 0);
+assert(result28a === todayStr, `{DATE}替换为当前日期${todayStr}`);
+const result28b = resolveDefaultBatch('{SEQ}', 2);
+assert(result28b === '003', '{SEQ}替换为三位序号003');
+const result28c = resolveDefaultBatch('BATCH-{DATE}-{SEQ}', 5);
+assert(result28c === `BATCH-${todayStr}-006`, `混合模式BATCH-{DATE}-{SEQ}正确：${result28c}`);
+const result28d = resolveDefaultBatch('', 0);
+assert(result28d === '', '空模式返回空字符串');
+
+console.log('\n【测试29】方案删除后 lastSelectedSchemeId 安全降级');
+let state29 = createSchemeInitialState();
+const { state: s29a, scheme: scheme29 } = createImportScheme(state29, '待删方案');
+state29 = s29a;
+state29 = schemeReducer(state29, { type: 'SET_LAST_SELECTED_SCHEME', schemeId: scheme29.id });
+assert(state29.lastSelectedSchemeId === scheme29.id, 'lastSelectedSchemeId已设置');
+const delete29 = deleteImportScheme(state29, scheme29.id);
+assert(delete29.success === true, '删除成功');
+state29 = delete29.state;
+assert(state29.lastSelectedSchemeId === null, '删除后lastSelectedSchemeId被清空为null');
+const serialized29 = JSON.stringify(state29);
+const restored29 = schemeReducer(createSchemeInitialState(), { type: 'SET_DATA', payload: JSON.parse(serialized29) });
+assert(restored29.lastSelectedSchemeId === null, '重启后lastSelectedSchemeId仍为null');
+
+console.log('\n【测试30】方案被JSON导入覆盖后 createdById 保留');
+let state30 = createSchemeInitialState();
+state30.currentUserId = 'user-1';
+const { state: s30a, scheme: scheme30 } = createImportScheme(state30, '方案X');
+state30 = s30a;
+assert(state30.importSchemes[0].createdById === 'user-1', '创建人为user-1');
+const overwriteJSON30 = JSON.stringify({
+  version: 1,
+  exportedAt: new Date().toISOString(),
+  exportedBy: '外部用户',
+  schemes: [{
+    name: '方案X',
+    columnMappings: [{ csvColumn: '新编号', targetField: 'sampleNo' }],
+    defaultBatch: { batchNoPattern: '', batchNamePattern: '' },
+    validationToggles: { ...defaultValidationToggles },
+    createdById: 'user-2',
+    createdBy: '外部创建者',
+    isLocked: false,
+    isShared: false,
+  }],
+});
+const import30 = importSchemesJSON(state30, overwriteJSON30, 'overwrite');
+assert(import30.overwrittenCount === 1, '覆盖1个');
+state30 = import30.state;
+assert(state30.importSchemes[0].createdById === 'user-1', '覆盖后createdById仍为user-1（不变）');
+assert(state30.importSchemes[0].createdBy === '操作员小王', '覆盖后createdBy仍为原值');
+assert(state30.importSchemes[0].isLocked === false, '覆盖后isLocked保留原值');
+assert(state30.importSchemes[0].isShared === false, '覆盖后isShared保留原值');
+
+console.log('\n【测试31】方案被JSON导入覆盖后锁定共享状态不变');
+let state31 = createSchemeInitialState();
+state31.currentUserId = 'user-1';
+const { state: s31a, scheme: scheme31 } = createImportScheme(state31, '锁定共享覆盖测试', {
+  isLocked: true,
+  isShared: true,
+});
+state31 = s31a;
+assert(state31.importSchemes[0].isLocked === true, '原方案已锁定');
+assert(state31.importSchemes[0].isShared === true, '原方案已共享');
+const overwriteJSON31 = JSON.stringify({
+  version: 1,
+  exportedAt: new Date().toISOString(),
+  exportedBy: '其他人',
+  schemes: [{
+    name: '锁定共享覆盖测试',
+    columnMappings: [{ csvColumn: '篡改列', targetField: 'sampleNo' }],
+    defaultBatch: { batchNoPattern: '', batchNamePattern: '' },
+    validationToggles: { ...defaultValidationToggles },
+    isLocked: false,
+    isShared: false,
+  }],
+});
+const import31 = importSchemesJSON(state31, overwriteJSON31, 'overwrite');
+assert(import31.overwrittenCount === 1, '覆盖1个');
+state31 = import31.state;
+assert(state31.importSchemes[0].isLocked === true, '覆盖后isLocked仍为true');
+assert(state31.importSchemes[0].isShared === true, '覆盖后isShared仍为true');
+
+console.log('\n【测试32】完整桌面链路 - 保存方案、重启、导回JSON、冲突处理、再导入CSV');
+let state32 = createSchemeInitialState();
+state32.currentUserId = 'user-1';
+const { state: s32a, scheme: scheme32 } = createImportScheme(state32, '完整链路方案', {
+  columnMappings: [
+    { csvColumn: '编号', targetField: 'sampleNo' },
+    { csvColumn: '数量', targetField: 'quantity' },
+    { csvColumn: '来源', targetField: 'source' },
+  ],
+  defaultBatch: { batchNoPattern: 'BATCH-{DATE}-{SEQ}', batchNamePattern: '日常送检' },
+  validationToggles: { ...defaultValidationToggles, skipEmptySource: false },
+});
+state32 = s32a;
+state32 = schemeReducer(state32, { type: 'SET_LAST_SELECTED_SCHEME', schemeId: scheme32.id });
+assert(state32.lastSelectedSchemeId === scheme32.id, 'lastSelectedSchemeId已设置');
+
+const serialized32 = JSON.stringify(state32);
+const restored32 = schemeReducer(createSchemeInitialState(), { type: 'SET_DATA', payload: JSON.parse(serialized32) });
+assert(restored32.lastSelectedSchemeId === scheme32.id, '重启后lastSelectedSchemeId恢复');
+
+const export32 = exportSchemesJSON(state32, [scheme32.id]);
+const json32 = export32.json;
+state32 = export32.state;
+
+const delete32 = deleteImportScheme(state32, scheme32.id);
+assert(delete32.success === true, '删除成功');
+state32 = delete32.state;
+assert(state32.importSchemes.length === 0, '方案已删除');
+assert(state32.lastSelectedSchemeId === null, '删除后lastSelectedSchemeId已清空');
+
+const import32a = importSchemesJSON(state32, json32, 'skip');
+assert(import32a.importedCount === 1, 'skip模式导入1个新方案（同名不冲突）');
+assert(import32a.skippedCount === 0, '无冲突跳过');
+state32 = import32a.state;
+const reimportedScheme32 = state32.importSchemes.find((s) => s.name === '完整链路方案');
+assert(reimportedScheme32 !== undefined, '方案已导入回来');
+
+const import32b = importSchemesJSON(state32, json32, 'skip');
+assert(import32b.skippedCount === 1, 'skip模式同名冲突跳过1个');
+assert(import32b.importedCount === 0, '无新增');
+state32 = import32b.state;
+
+const import32c = importSchemesJSON(state32, json32, 'overwrite');
+assert(import32c.overwrittenCount === 1, 'overwrite模式覆盖1个');
+assert(import32c.skippedCount === 0, '无跳过');
+state32 = import32c.state;
+assert(state32.importSchemes[0].createdById === 'user-1', '覆盖后createdById仍为user-1');
+
+const schemeForCSV32 = state32.importSchemes[0];
+const csv32 = "编号,数量,来源\nC-001,10,\nC-002,5,外科";
+const parsedRows32 = parseCSVWithScheme(csv32, schemeForCSV32.columnMappings);
+assert(parsedRows32.length === 2, 'CSV解析出2行');
+assert(parsedRows32[0].sampleNo === 'C-001', '列映射sampleNo正确');
+assert(parsedRows32[0].quantity === '10', '列映射quantity正确');
+assert(parsedRows32[0].source === '', '列映射source正确（空来源）');
+assert(parsedRows32[1].sampleNo === 'C-002', '第二行sampleNo正确');
+assert(parsedRows32[1].source === '外科', '第二行source正确');
+
+const { state: s32b, batch: batch32 } = createBatch(state32, 'BATCH-32', '链路测试批次');
+state32 = s32b;
+const preVal32 = prevalidateImportCSVWithToggles(state32, batch32.id, parsedRows32, schemeForCSV32.validationToggles);
+assert(preVal32.results[0].valid === true, '第1行校验通过（skipEmptySource=false空来源不拦截）');
+assert(preVal32.results[1].valid === true, '第2行校验通过');
+assert(preVal32.results[0].sampleNo === 'C-001', '预检结果sampleNo正确');
+
 console.log('\n========== 测试结果 ==========\n');
 if (failures > 0) {
   console.log(`❌ 共 ${failures} 项失败，请修复。\n`);
   process.exit(1);
 } else {
-  console.log('✅ 全部通过，批量导入、台账、权限、持久化、导入方案管理功能完整。\n');
+  console.log('✅ 全部通过，批量导入、台账、权限、持久化、导入方案管理、列映射、校验开关、默认批次、完整链路功能完整。\n');
   process.exit(0);
 }
