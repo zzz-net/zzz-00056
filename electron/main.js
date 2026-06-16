@@ -27,6 +27,11 @@ const defaultData = {
   lastSelectedSchemeId: null,
   lastSchemeChange: null,
   operationLog: [],
+  importTasks: [],
+  taskAuditLog: [],
+  lastActiveTaskId: null,
+  rollbackSnapshots: [],
+  lastImportId: null,
 }
 
 function mergeWithDefaults(data) {
@@ -40,6 +45,18 @@ function mergeWithDefaults(data) {
     lastSelectedSchemeId: data.lastSelectedSchemeId || null,
     lastSchemeChange: data.lastSchemeChange || null,
     operationLog: data.operationLog || [],
+    importTasks: (data.importTasks || []).map((t) => ({
+      ...t,
+      draftState: t.draftState || {
+        csvContent: null, fileName: null, selectedBatchId: null,
+        selectedSchemeId: null, columnMappings: null, validationToggles: null,
+        prevalidateSummary: null, parsedRows: null,
+      },
+    })),
+    taskAuditLog: data.taskAuditLog || [],
+    lastActiveTaskId: data.lastActiveTaskId || null,
+    rollbackSnapshots: data.rollbackSnapshots || [],
+    lastImportId: data.lastImportId || null,
     samples: (data.samples || []).map((s) => ({
       ...s,
       history: s.history || [],
@@ -50,6 +67,13 @@ function mergeWithDefaults(data) {
     const schemeExists = merged.importSchemes.some((s) => s.id === merged.lastSelectedSchemeId)
     if (!schemeExists) {
       merged.lastSelectedSchemeId = null
+    }
+  }
+
+  if (merged.lastActiveTaskId) {
+    const taskExists = merged.importTasks.some((t) => t.id === merged.lastActiveTaskId)
+    if (!taskExists) {
+      merged.lastActiveTaskId = null
     }
   }
 

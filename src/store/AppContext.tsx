@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useReducer, useEffect, ReactNode, useState, useRef } from 'react'
-import { AppData, Sample, Batch, HistoryRecord, SampleStatus, User, ImportResult, BatchLedgerEntry, PrevalidateSummary, PrevalidateResult, ImportScheme, SchemeAuditLogEntry, SchemeAuditAction, ConflictResolution, ColumnMapping, ValidationToggles, DefaultBatchInfo, SchemeChangeEvent, SchemeChangeType, OperationLogEntry, OperationLogCategory } from '../types'
+import { AppData, Sample, Batch, HistoryRecord, SampleStatus, User, ImportResult, BatchLedgerEntry, PrevalidateSummary, PrevalidateResult, ImportScheme, SchemeAuditLogEntry, SchemeAuditAction, ConflictResolution, ColumnMapping, ValidationToggles, DefaultBatchInfo, SchemeChangeEvent, SchemeChangeType, OperationLogEntry, OperationLogCategory, ImportTask, ImportTaskStatus, ImportTaskDraftState, TaskAuditLogEntry, TaskAuditAction, ImportRollbackSnapshot } from '../types'
 import { v4 as uuidv4 } from 'uuid'
 
 const STORAGE_KEY = 'lab-sample-tracker-data'
@@ -25,6 +25,15 @@ type Action =
   | { type: 'SET_LAST_SCHEME_CHANGE'; payload: SchemeChangeEvent | null }
   | { type: 'CLEAR_LAST_SCHEME_CHANGE' }
   | { type: 'ADD_OPERATION_LOG'; payload: OperationLogEntry }
+  | { type: 'ADD_IMPORT_TASK'; payload: ImportTask }
+  | { type: 'UPDATE_IMPORT_TASK'; payload: ImportTask }
+  | { type: 'DELETE_IMPORT_TASK'; taskId: string }
+  | { type: 'ADD_TASK_AUDIT_LOG'; payload: TaskAuditLogEntry }
+  | { type: 'SET_LAST_ACTIVE_TASK'; taskId: string | null }
+  | { type: 'ADD_ROLLBACK_SNAPSHOT'; payload: ImportRollbackSnapshot }
+  | { type: 'REMOVE_SAMPLES_BATCH'; sampleIds: string[]; ledgerIds: string[] }
+  | { type: 'SET_LAST_IMPORT_ID'; importId: string | null }
+  | { type: 'UPDATE_IMPORT_RESULT'; payload: ImportResult }
 
 const defaultData: AppData = {
   users: [
@@ -41,6 +50,11 @@ const defaultData: AppData = {
   lastSelectedSchemeId: null,
   lastSchemeChange: null,
   operationLog: [],
+  importTasks: [],
+  taskAuditLog: [],
+  lastActiveTaskId: null,
+  rollbackSnapshots: [],
+  lastImportId: null,
 }
 
 const initialState: AppState = defaultData
@@ -127,6 +141,42 @@ function appReducer(state: AppState, action: Action): AppState {
       return { ...state, lastSchemeChange: null }
     case 'ADD_OPERATION_LOG':
       return { ...state, operationLog: [...state.operationLog, action.payload] }
+    case 'ADD_IMPORT_TASK':
+      return { ...state, importTasks: [...state.importTasks, action.payload] }
+    case 'UPDATE_IMPORT_TASK':
+      return {
+        ...state,
+        importTasks: state.importTasks.map((t) =>
+          t.id === action.payload.id ? action.payload : t
+        ),
+      }
+    case 'DELETE_IMPORT_TASK':
+      return {
+        ...state,
+        importTasks: state.importTasks.filter((t) => t.id !== action.taskId),
+        lastActiveTaskId: state.lastActiveTaskId === action.taskId ? null : state.lastActiveTaskId,
+      }
+    case 'ADD_TASK_AUDIT_LOG':
+      return { ...state, taskAuditLog: [...state.taskAuditLog, action.payload] }
+    case 'SET_LAST_ACTIVE_TASK':
+      return { ...state, lastActiveTaskId: action.taskId }
+    case 'ADD_ROLLBACK_SNAPSHOT':
+      return { ...state, rollbackSnapshots: [...state.rollbackSnapshots, action.payload] }
+    case 'REMOVE_SAMPLES_BATCH':
+      return {
+        ...state,
+        samples: state.samples.filter((s) => !action.sampleIds.includes(s.id)),
+        batchLedger: state.batchLedger.filter((l) => !action.ledgerIds.includes(l.id)),
+      }
+    case 'SET_LAST_IMPORT_ID':
+      return { ...state, lastImportId: action.importId }
+    case 'UPDATE_IMPORT_RESULT':
+      return {
+        ...state,
+        importResults: state.importResults.map((r) =>
+          r.id === action.payload.id ? action.payload : r
+        ),
+      }
     default:
       return state
   }
@@ -163,6 +213,7 @@ interface AppContextType {
       schemeName?: string
       validationToggles?: ValidationToggles
       columnMappings?: ColumnMapping[]
+      taskId?: string
     }
   ) => {
     success: boolean
@@ -202,6 +253,29 @@ interface AppContextType {
   clearLastSchemeChange: () => void
   isLastSelectedSchemeValid: () => boolean
   addOperationLog: (category: OperationLogCategory, action: string, detail?: string, targetId?: string, targetName?: string) => void
+  createImportTask: (taskName: string, draftState: Partial<ImportTaskDraftState>) => ImportTask
+  updateImportTaskDraft: (taskId: string, draftUpdates: Partial<ImportTaskDraftState>, statusUpdate?: ImportTaskStatus) => { success: boolean; error?: string; task?: ImportTask }
+  completeImportTask: (taskId: string, importResultId: string, importResultSnapshot: ImportResult) => { success: boolean; error?: string }
+  cancelImportTask: (taskId: string) => { success: boolean; error?: string }
+  deleteImportTask: (taskId: string) => { success: boolean; error?: string }
+  renameImportTask: (taskId: string, newName: string) => { success: boolean; error?: string }
+  revertLastImport: (reason?: string) => { success: boolean; error?: string; revertedCount?: number }
+  canRevertLastImport: () => boolean
+  getLastImportSnapshot: () => ImportRollbackSnapshot | null
+  getTaskAuditLog: (taskId: string) => TaskAuditLogEntry[]
+  addTaskAuditLog: (taskId: string, taskName: string, action: TaskAuditAction, detail?: string) => void
+  canModifyTask: (task: ImportTask) => boolean
+  setLastActiveTask: (taskId: string | null) => void
+  buildImportValidationPipeline: (
+    batchId: string,
+    csvContent: string,
+    schemeId: string | null
+  ) => {
+    parsedRows: { sampleNo: string; quantity: string; source: string }[]
+    validationToggles: ValidationToggles
+    columnMappings: ColumnMapping[]
+    prevalidateSummary: PrevalidateSummary
+  }
 }
 
 const AppContext = createContext<AppContextType | null>(null)
@@ -232,6 +306,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
       lastSelectedSchemeId: data.lastSelectedSchemeId || null,
       lastSchemeChange: data.lastSchemeChange || null,
       operationLog: data.operationLog || [],
+      importTasks: (data.importTasks || []).map((t) => ({
+        ...t,
+        draftState: t.draftState || {
+          csvContent: null, fileName: null, selectedBatchId: null,
+          selectedSchemeId: null, columnMappings: null, validationToggles: null,
+          prevalidateSummary: null, parsedRows: null,
+        },
+      })),
+      taskAuditLog: data.taskAuditLog || [],
+      lastActiveTaskId: data.lastActiveTaskId || null,
+      rollbackSnapshots: data.rollbackSnapshots || [],
+      lastImportId: data.lastImportId || null,
       samples: (data.samples || []).map((s) => ({
         ...s,
         history: s.history || [],
@@ -242,6 +328,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
       const schemeExists = merged.importSchemes.some((s) => s.id === merged.lastSelectedSchemeId)
       if (!schemeExists) {
         merged.lastSelectedSchemeId = null
+      }
+    }
+
+    if (merged.lastActiveTaskId) {
+      const taskExists = merged.importTasks.some((t) => t.id === merged.lastActiveTaskId)
+      if (!taskExists) {
+        merged.lastActiveTaskId = null
       }
     }
 
@@ -340,7 +433,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     )
   }
 
-  const addSample = (sampleData: Omit<Sample, 'id' | 'history'>): { success: boolean; error?: string; sample?: Sample } => {
+  const addSample = (sampleData: Omit<Sample, 'id' | 'history'>): { success: boolean; error?: string; sample?: Sample; ledgerEntryId?: string } => {
     if (checkDuplicateSampleNo(sampleData.sampleNo, sampleData.batchId)) {
       return { success: false, error: '同一批次中已存在相同的样本编号，无法保存' }
     }
@@ -382,7 +475,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
     dispatch({ type: 'ADD_BATCH_LEDGER_ENTRY', payload: ledgerEntry })
 
-    return { success: true, sample }
+    return { success: true, sample, ledgerEntryId: ledgerEntry.id }
   }
 
   const canReview = (): boolean => {
@@ -702,6 +795,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       schemeName?: string
       validationToggles?: ValidationToggles
       columnMappings?: ColumnMapping[]
+      taskId?: string
     }
   ): {
     success: boolean
@@ -714,6 +808,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
     const invalidRows = validatedRows.filter((r) => !r.valid)
     const importId = uuidv4()
     const importedSampleIds: string[] = []
+    const importedLedgerIds: string[] = []
+    const importedHistories: HistoryRecord[] = []
 
     const user = getCurrentUser()
     const importResult: ImportResult = {
@@ -774,6 +870,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
         if (result.success && result.sample) {
           importedSampleIds.push(result.sample.id)
           importedInThisBatch.set(row.sampleNo, result.sample.id)
+          if (result.ledgerEntryId) {
+            importedLedgerIds.push(result.ledgerEntryId)
+          }
+          if (result.sample.history && result.sample.history.length > 0) {
+            importedHistories.push(result.sample.history[0])
+          }
           importResult.successCount++
           importResult.details.push({
             rowIndex: row.rowIndex,
@@ -801,6 +903,21 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
 
     dispatch({ type: 'ADD_IMPORT_RESULT', payload: importResult })
+    dispatch({ type: 'SET_LAST_IMPORT_ID', importId })
+
+    if (importedSampleIds.length > 0) {
+      const snapshot: ImportRollbackSnapshot = {
+        importResultId: importId,
+        taskId: opts?.taskId || null,
+        removedSampleIds: importedSampleIds,
+        removedBatchLedgerIds: importedLedgerIds,
+        removedSampleHistories: importedHistories,
+        createdAt: new Date().toISOString(),
+        createdBy: user?.username || '未知',
+        createdById: state.currentUserId || '',
+      }
+      dispatch({ type: 'ADD_ROLLBACK_SNAPSHOT', payload: snapshot })
+    }
 
     const batch = state.batches.find((b) => b.id === batchId)
     addOperationLog(
@@ -1176,6 +1293,267 @@ export function AppProvider({ children }: { children: ReactNode }) {
       .replace('{SEQ}', String(state.batches.length + 1).padStart(3, '0'))
   }
 
+  const addTaskAuditLog = (taskId: string, taskName: string, action: TaskAuditAction, detail?: string) => {
+    const user = getCurrentUser()
+    const entry: TaskAuditLogEntry = {
+      id: uuidv4(),
+      taskId,
+      taskName,
+      action,
+      operatorId: state.currentUserId || '',
+      operatorName: user?.username || '未知',
+      timestamp: new Date().toISOString(),
+      detail,
+    }
+    dispatch({ type: 'ADD_TASK_AUDIT_LOG', payload: entry })
+  }
+
+  const canModifyTask = (task: ImportTask): boolean => {
+    if (task.status === 'completed' || task.status === 'reverted') {
+      const user = getCurrentUser()
+      return user?.role === 'reviewer' || task.createdById === state.currentUserId
+    }
+    if (task.createdById !== state.currentUserId) {
+      const user = getCurrentUser()
+      return user?.role === 'reviewer'
+    }
+    return true
+  }
+
+  const createImportTask = (taskName: string, draftState: Partial<ImportTaskDraftState>): ImportTask => {
+    const user = getCurrentUser()
+    const scheme = draftState.selectedSchemeId
+      ? state.importSchemes.find((s) => s.id === draftState.selectedSchemeId)
+      : null
+    const batch = draftState.selectedBatchId
+      ? state.batches.find((b) => b.id === draftState.selectedBatchId)
+      : null
+    const task: ImportTask = {
+      id: uuidv4(),
+      taskName: taskName || `导入任务_${new Date().toLocaleString('zh-CN')}`,
+      status: 'draft',
+      batchId: draftState.selectedBatchId || null,
+      batchNo: batch?.batchNo,
+      schemeId: draftState.selectedSchemeId || null,
+      schemeName: scheme?.name,
+      draftState: {
+        csvContent: draftState.csvContent || null,
+        fileName: draftState.fileName || null,
+        selectedBatchId: draftState.selectedBatchId || null,
+        selectedSchemeId: draftState.selectedSchemeId || null,
+        columnMappings: draftState.columnMappings || (scheme ? scheme.columnMappings : null),
+        validationToggles: draftState.validationToggles || (scheme ? scheme.validationToggles : null),
+        prevalidateSummary: draftState.prevalidateSummary || null,
+        parsedRows: draftState.parsedRows || null,
+      },
+      importResultId: null,
+      createdBy: user?.username || '未知',
+      createdById: state.currentUserId || '',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }
+    dispatch({ type: 'ADD_IMPORT_TASK', payload: task })
+    dispatch({ type: 'SET_LAST_ACTIVE_TASK', taskId: task.id })
+    addTaskAuditLog(task.id, task.taskName, 'create', '创建导入任务')
+    addOperationLog('task', '创建任务', `创建导入任务：${task.taskName}`, task.id, task.taskName)
+    return task
+  }
+
+  const updateImportTaskDraft = (
+    taskId: string,
+    draftUpdates: Partial<ImportTaskDraftState>,
+    statusUpdate?: ImportTaskStatus
+  ): { success: boolean; error?: string; task?: ImportTask } => {
+    const task = state.importTasks.find((t) => t.id === taskId)
+    if (!task) return { success: false, error: '任务不存在' }
+    if (!canModifyTask(task)) return { success: false, error: '无权修改此任务' }
+
+    const scheme = draftUpdates.selectedSchemeId
+      ? state.importSchemes.find((s) => s.id === draftUpdates.selectedSchemeId)
+      : (task.schemeId ? state.importSchemes.find((s) => s.id === task.schemeId) : null)
+    const batch = draftUpdates.selectedBatchId
+      ? state.batches.find((b) => b.id === draftUpdates.selectedBatchId)
+      : (task.batchId ? state.batches.find((b) => b.id === task.batchId) : null)
+
+    const newStatus = statusUpdate || task.status
+
+    const updated: ImportTask = {
+      ...task,
+      status: newStatus,
+      batchId: draftUpdates.selectedBatchId !== undefined ? draftUpdates.selectedBatchId || null : task.batchId,
+      batchNo: batch?.batchNo || task.batchNo,
+      schemeId: draftUpdates.selectedSchemeId !== undefined ? draftUpdates.selectedSchemeId || null : task.schemeId,
+      schemeName: scheme?.name || task.schemeName,
+      draftState: {
+        ...task.draftState,
+        ...draftUpdates,
+      },
+      updatedAt: new Date().toISOString(),
+    }
+    dispatch({ type: 'UPDATE_IMPORT_TASK', payload: updated })
+    if (statusUpdate === 'prevalidated') {
+      addTaskAuditLog(taskId, updated.taskName, 'prevalidate', '完成数据预检')
+    } else {
+      addTaskAuditLog(taskId, updated.taskName, 'update_draft', '更新任务草稿')
+    }
+    return { success: true, task: updated }
+  }
+
+  const completeImportTask = (
+    taskId: string,
+    importResultId: string,
+    importResultSnapshot: ImportResult
+  ): { success: boolean; error?: string } => {
+    const task = state.importTasks.find((t) => t.id === taskId)
+    if (!task) return { success: false, error: '任务不存在' }
+    const updated: ImportTask = {
+      ...task,
+      status: 'completed',
+      importResultId,
+      importResultSnapshot,
+      completedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }
+    dispatch({ type: 'UPDATE_IMPORT_TASK', payload: updated })
+    addTaskAuditLog(taskId, updated.taskName, 'execute', `执行完成，成功${importResultSnapshot.successCount}条，失败${importResultSnapshot.failedCount}条`)
+    addOperationLog('task', '执行任务', `任务「${task.taskName}」执行完成`, taskId, task.taskName)
+    return { success: true }
+  }
+
+  const cancelImportTask = (taskId: string): { success: boolean; error?: string } => {
+    const task = state.importTasks.find((t) => t.id === taskId)
+    if (!task) return { success: false, error: '任务不存在' }
+    if (!canModifyTask(task)) return { success: false, error: '无权取消此任务' }
+    const updated: ImportTask = {
+      ...task,
+      status: 'cancelled',
+      updatedAt: new Date().toISOString(),
+    }
+    dispatch({ type: 'UPDATE_IMPORT_TASK', payload: updated })
+    addTaskAuditLog(taskId, updated.taskName, 'cancel', '取消任务')
+    addOperationLog('task', '取消任务', `取消任务：${task.taskName}`, taskId, task.taskName)
+    return { success: true }
+  }
+
+  const deleteImportTask = (taskId: string): { success: boolean; error?: string } => {
+    const task = state.importTasks.find((t) => t.id === taskId)
+    if (!task) return { success: false, error: '任务不存在' }
+    if (!canModifyTask(task)) return { success: false, error: '无权删除此任务' }
+    dispatch({ type: 'DELETE_IMPORT_TASK', taskId })
+    addTaskAuditLog(taskId, task.taskName, 'delete', '删除任务')
+    addOperationLog('task', '删除任务', `删除任务：${task.taskName}`, taskId, task.taskName)
+    return { success: true }
+  }
+
+  const renameImportTask = (taskId: string, newName: string): { success: boolean; error?: string } => {
+    const task = state.importTasks.find((t) => t.id === taskId)
+    if (!task) return { success: false, error: '任务不存在' }
+    if (!canModifyTask(task)) return { success: false, error: '无权重命名此任务' }
+    const oldName = task.taskName
+    const updated: ImportTask = { ...task, taskName: newName, updatedAt: new Date().toISOString() }
+    dispatch({ type: 'UPDATE_IMPORT_TASK', payload: updated })
+    addTaskAuditLog(taskId, newName, 'rename', `任务重命名：${oldName} → ${newName}`)
+    return { success: true }
+  }
+
+  const buildImportValidationPipeline = (
+    batchId: string,
+    csvContent: string,
+    schemeId: string | null
+  ) => {
+    const scheme = schemeId ? state.importSchemes.find((s) => s.id === schemeId) : null
+    const columnMappings = scheme ? scheme.columnMappings : [
+      { csvColumn: '样本编号', targetField: 'sampleNo' },
+      { csvColumn: '数量', targetField: 'quantity' },
+      { csvColumn: '来源', targetField: 'source' },
+    ]
+    const validationToggles = scheme ? scheme.validationToggles : { ...defaultValidationToggles }
+    const parsedRows = scheme
+      ? parseCSVWithScheme(csvContent, scheme.columnMappings)
+      : parseCSV(csvContent)
+    const prevalidateSummary = prevalidateImportCSV(batchId, parsedRows, validationToggles)
+    return { parsedRows, validationToggles, columnMappings, prevalidateSummary }
+  }
+
+  const getTaskAuditLog = (taskId: string): TaskAuditLogEntry[] => {
+    return state.taskAuditLog.filter((l) => l.taskId === taskId)
+  }
+
+  const setLastActiveTask = (taskId: string | null) => {
+    dispatch({ type: 'SET_LAST_ACTIVE_TASK', taskId })
+  }
+
+  const canRevertLastImport = (): boolean => {
+    if (!state.lastImportId) return false
+    const snapshot = state.rollbackSnapshots.find((s) => s.importResultId === state.lastImportId)
+    if (!snapshot) return false
+    const result = state.importResults.find((r) => r.id === state.lastImportId)
+    if (!result || result.id === '__reverted__') return false
+    const user = getCurrentUser()
+    if (user?.role !== 'reviewer' && snapshot.createdById !== state.currentUserId) {
+      return false
+    }
+    return true
+  }
+
+  const getLastImportSnapshot = (): ImportRollbackSnapshot | null => {
+    if (!state.lastImportId) return null
+    return state.rollbackSnapshots.find((s) => s.importResultId === state.lastImportId) || null
+  }
+
+  const revertLastImport = (reason?: string): { success: boolean; error?: string; revertedCount?: number } => {
+    if (!canRevertLastImport()) {
+      return { success: false, error: '无可撤销的导入记录，或无权限撤销' }
+    }
+    const importResultId = state.lastImportId!
+    const snapshot = state.rollbackSnapshots.find((s) => s.importResultId === importResultId)
+    if (!snapshot) return { success: false, error: '撤销快照不存在' }
+
+    const result = state.importResults.find((r) => r.id === importResultId)
+    if (!result) return { success: false, error: '导入记录不存在' }
+
+    dispatch({ type: 'REMOVE_SAMPLES_BATCH', sampleIds: snapshot.removedSampleIds, ledgerIds: snapshot.removedBatchLedgerIds })
+
+    const user = getCurrentUser()
+    const updatedResult: ImportResult = {
+      ...result,
+      id: result.id,
+      details: result.details.map((d) => ({ ...d })),
+    }
+    ;(updatedResult as any)._reverted = true
+    ;(updatedResult as any)._revertedAt = new Date().toISOString()
+    ;(updatedResult as any)._revertedBy = user?.username
+    ;(updatedResult as any)._revertedReason = reason || '未说明'
+    dispatch({ type: 'UPDATE_IMPORT_RESULT', payload: updatedResult })
+
+    if (snapshot.taskId) {
+      const task = state.importTasks.find((t) => t.id === snapshot.taskId)
+      if (task) {
+        const updatedTask: ImportTask = {
+          ...task,
+          status: 'reverted',
+          revertedAt: new Date().toISOString(),
+          revertedBy: user?.username,
+          revertedReason: reason || '未说明',
+          updatedAt: new Date().toISOString(),
+        }
+        dispatch({ type: 'UPDATE_IMPORT_TASK', payload: updatedTask })
+        addTaskAuditLog(task.id, task.taskName, 'revert', `撤销导入${reason ? '：' + reason : ''}`)
+      }
+    }
+
+    dispatch({ type: 'SET_LAST_IMPORT_ID', importId: null })
+
+    addOperationLog(
+      'import',
+      '撤销导入',
+      `撤销导入记录，回滚${snapshot.removedSampleIds.length}条样本${reason ? '，原因：' + reason : ''}`,
+      importResultId
+    )
+
+    return { success: true, revertedCount: snapshot.removedSampleIds.length }
+  }
+
   return (
     <AppContext.Provider
       value={{
@@ -1215,6 +1593,20 @@ export function AppProvider({ children }: { children: ReactNode }) {
         clearLastSchemeChange,
         isLastSelectedSchemeValid,
         addOperationLog,
+        createImportTask,
+        updateImportTaskDraft,
+        completeImportTask,
+        cancelImportTask,
+        deleteImportTask,
+        renameImportTask,
+        revertLastImport,
+        canRevertLastImport,
+        getLastImportSnapshot,
+        getTaskAuditLog,
+        addTaskAuditLog,
+        canModifyTask,
+        setLastActiveTask,
+        buildImportValidationPipeline,
       }}
     >
       {children}

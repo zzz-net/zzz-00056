@@ -7,8 +7,9 @@ import HandoverExport from './pages/HandoverExport'
 import BatchLedger from './pages/BatchLedger'
 import ImportHistory from './pages/ImportHistory'
 import ImportSchemeManager from './pages/ImportSchemeManager'
+import ImportTaskCenter from './pages/ImportTaskCenter'
 
-type Page = 'receive' | 'samples' | 'batches' | 'ledger' | 'export' | 'import-history' | 'import-schemes'
+type Page = 'receive' | 'samples' | 'batches' | 'ledger' | 'export' | 'import-history' | 'import-schemes' | 'import-tasks'
 
 function App() {
   const [currentPage, setCurrentPage] = useState<Page>('receive')
@@ -24,6 +25,7 @@ function App() {
     { key: 'samples', label: '样本列表', icon: '📋' },
     { key: 'batches', label: '批次管理', icon: '📦' },
     { key: 'ledger', label: '流转台账', icon: '📊' },
+    { key: 'import-tasks', label: '导入任务中心', icon: '🎯' },
     { key: 'import-history', label: '导入历史', icon: '📋' },
     { key: 'import-schemes', label: '导入方案', icon: '🔧' },
     { key: 'export', label: '交接导出', icon: '📤' },
@@ -66,6 +68,7 @@ function App() {
         {currentPage === 'samples' && <SampleList />}
         {currentPage === 'batches' && <BatchList />}
         {currentPage === 'ledger' && <BatchLedger />}
+        {currentPage === 'import-tasks' && <ImportTaskCenter />}
         {currentPage === 'import-history' && <ImportHistory />}
         {currentPage === 'import-schemes' && <ImportSchemeManager />}
         {currentPage === 'export' && <HandoverExport />}

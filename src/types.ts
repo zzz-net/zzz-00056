@@ -174,7 +174,7 @@ export interface SchemeChangeEvent {
   affectedLastSelected?: boolean
 }
 
-export type OperationLogCategory = 'batch' | 'import' | 'scheme'
+export type OperationLogCategory = 'batch' | 'import' | 'scheme' | 'task'
 
 export interface OperationLogEntry {
   id: string
@@ -186,6 +186,65 @@ export interface OperationLogEntry {
   detail?: string
   targetId?: string
   targetName?: string
+}
+
+export type ImportTaskStatus = 'draft' | 'prevalidated' | 'importing' | 'completed' | 'cancelled' | 'reverted'
+
+export interface ImportTaskDraftState {
+  csvContent: string | null
+  fileName: string | null
+  selectedBatchId: string | null
+  selectedSchemeId: string | null
+  columnMappings: ColumnMapping[] | null
+  validationToggles: ValidationToggles | null
+  prevalidateSummary: PrevalidateSummary | null
+  parsedRows: { sampleNo: string; quantity: string; source: string }[] | null
+  uiScrollPosition?: number
+}
+
+export interface ImportTask {
+  id: string
+  taskName: string
+  status: ImportTaskStatus
+  batchId: string | null
+  batchNo?: string
+  schemeId: string | null
+  schemeName?: string
+  draftState: ImportTaskDraftState
+  importResultId: string | null
+  importResultSnapshot?: ImportResult
+  revertedAt?: string
+  revertedBy?: string
+  revertedReason?: string
+  createdBy: string
+  createdById: string
+  createdAt: string
+  updatedAt: string
+  completedAt?: string
+}
+
+export type TaskAuditAction = 'create' | 'update_draft' | 'resume' | 'prevalidate' | 'execute' | 'cancel' | 'revert' | 'delete' | 'rename'
+
+export interface TaskAuditLogEntry {
+  id: string
+  taskId: string
+  taskName: string
+  action: TaskAuditAction
+  operatorId: string
+  operatorName: string
+  timestamp: string
+  detail?: string
+}
+
+export interface ImportRollbackSnapshot {
+  importResultId: string
+  taskId: string | null
+  removedSampleIds: string[]
+  removedBatchLedgerIds: string[]
+  removedSampleHistories: HistoryRecord[]
+  createdAt: string
+  createdBy: string
+  createdById: string
 }
 
 export interface AppData {
@@ -200,4 +259,9 @@ export interface AppData {
   lastSelectedSchemeId: string | null
   lastSchemeChange: SchemeChangeEvent | null
   operationLog: OperationLogEntry[]
+  importTasks: ImportTask[]
+  taskAuditLog: TaskAuditLogEntry[]
+  lastActiveTaskId: string | null
+  rollbackSnapshots: ImportRollbackSnapshot[]
+  lastImportId: string | null
 }

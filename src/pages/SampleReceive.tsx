@@ -3,7 +3,32 @@ import { useApp } from '../store/AppContext'
 import { STATUS_LABELS, STATUS_COLORS, PrevalidateSummary, ValidationToggles, SchemeChangeEvent, ConflictResolution } from '../types'
 
 function SampleReceive() {
-  const { state, createBatch, addSample, getCurrentUser, parseCSV, parseCSVWithScheme, prevalidateImportCSV, batchImportSamples, doExportCSV, setLastSelectedScheme, resolveDefaultBatch, clearLastSchemeChange, isLastSelectedSchemeValid, importSchemesJSON, exportSchemesJSON, doExportJSON } = useApp()
+  const {
+    state,
+    createBatch,
+    addSample,
+    getCurrentUser,
+    parseCSV,
+    parseCSVWithScheme,
+    prevalidateImportCSV,
+    batchImportSamples,
+    doExportCSV,
+    setLastSelectedScheme,
+    resolveDefaultBatch,
+    clearLastSchemeChange,
+    isLastSelectedSchemeValid,
+    importSchemesJSON,
+    exportSchemesJSON,
+    doExportJSON,
+    createImportTask,
+    updateImportTaskDraft,
+    completeImportTask,
+    setLastActiveTask,
+    buildImportValidationPipeline,
+    canRevertLastImport,
+    revertLastImport,
+  } = useApp()
+
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [showBatchModal, setShowBatchModal] = useState(false)
   const [batchNo, setBatchNo] = useState('')
@@ -36,6 +61,14 @@ function SampleReceive() {
     success: boolean; importedCount: number; skippedCount: number; overwrittenCount: number; error?: string
   } | null>(null)
   const [quickSchemeConflictResolution, setQuickSchemeConflictResolution] = useState<ConflictResolution>('skip')
+
+  const [activeTaskId, setActiveTaskId] = useState<string | null>(null)
+  const [taskName, setTaskName] = useState('')
+  const [showResumePrompt, setShowResumePrompt] = useState(false)
+  const [showSaveTaskPrompt, setShowSaveTaskPrompt] = useState(false)
+  const [showNewTaskPrompt, setShowNewTaskPrompt] = useState(false)
+  const [showRevertConfirm, setShowRevertConfirm] = useState(false)
+  const [revertReason, setRevertReason] = useState('')
 
   useEffect(() => {
     if (!state.lastSchemeChange) {
@@ -176,6 +209,31 @@ function SampleReceive() {
     }
   }
 
+  const runPrevalidationPipeline = (csvContent: string, batchId: string, schemeId: string) => {
+    const pipeline = buildImportValidationPipeline(batchId, csvContent, schemeId || null)
+    setPrevalidateResult(pipeline.prevalidateSummary)
+    setImportedResult(null)
+
+    if (activeTaskId) {
+      updateImportTaskDraft(
+        activeTaskId,
+        {
+          csvContent,
+          fileName: pendingFileName,
+          selectedBatchId: batchId || null,
+          selectedSchemeId: schemeId || null,
+          columnMappings: pipeline.columnMappings,
+          validationToggles: pipeline.validationToggles,
+          prevalidateSummary: pipeline.prevalidateSummary,
+          parsedRows: pipeline.parsedRows,
+        },
+        'prevalidated'
+      )
+    }
+
+    return pipeline
+  }
+
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file) return
@@ -189,10 +247,17 @@ function SampleReceive() {
       if (!selectedBatchId) {
         setPrevalidateResult(null)
         setImportedResult(null)
+        if (activeTaskId) {
+          updateImportTaskDraft(activeTaskId, {
+            csvContent: content,
+            fileName: file.name,
+            selectedSchemeId: selectedSchemeId || null,
+          })
+        }
         return
       }
 
-      runPrevalidation(content, selectedBatchId, selectedSchemeId)
+      runPrevalidationPipeline(content, selectedBatchId, selectedSchemeId)
     }
     reader.readAsText(file)
   }
@@ -206,8 +271,14 @@ function SampleReceive() {
       schemeName: scheme?.name,
       validationToggles: scheme?.validationToggles,
       columnMappings: scheme?.columnMappings,
+      taskId: activeTaskId || undefined,
     })
     if (result.success && result.importResult) {
+      if (activeTaskId) {
+        completeImportTask(activeTaskId, result.importResult.id, result.importResult)
+        setActiveTaskId(null)
+        setLastActiveTask(null)
+      }
       setImportedResult({
         successCount: result.importResult.successCount,
         failedCount: result.importResult.failedCount,
@@ -228,7 +299,42 @@ function SampleReceive() {
     doExportCSV(template, '批量导入模板.csv')
   }
 
+  const handleSaveToTask = () => {
+    const taskNameVal = taskName.trim() || `导入任务_${new Date().toLocaleString('zh-CN')}`
+    const scheme = state.importSchemes.find((s) => s.id === selectedSchemeId)
+    const pipeline = pendingCSVContent && selectedBatchId
+      ? buildImportValidationPipeline(selectedBatchId, pendingCSVContent, selectedSchemeId || null)
+      : null
+    const task = createImportTask(taskNameVal, {
+      csvContent: pendingCSVContent,
+      fileName: pendingFileName,
+      selectedBatchId: selectedBatchId || null,
+      selectedSchemeId: selectedSchemeId || null,
+      columnMappings: pipeline?.columnMappings || (scheme ? scheme.columnMappings : null),
+      validationToggles: pipeline?.validationToggles || (scheme ? scheme.validationToggles : null),
+      prevalidateSummary: pipeline?.prevalidateSummary || prevalidateResult || null,
+      parsedRows: pipeline?.parsedRows || null,
+    })
+    setActiveTaskId(task.id)
+    setLastActiveTask(task.id)
+    setTaskName('')
+    setShowSaveTaskPrompt(false)
+    setShowNewTaskPrompt(false)
+    setSuccessMsg(`已保存到任务「${task.taskName}」，关闭窗口后可在「导入任务中心」恢复继续`)
+    setTimeout(() => setSuccessMsg(''), 4000)
+  }
+
   const handleOpenImportModal = () => {
+    const lastTaskId = state.lastActiveTaskId
+    const lastTask = lastTaskId ? state.importTasks.find((t) => t.id === lastTaskId) : null
+    if (lastTask && (lastTask.status === 'draft' || lastTask.status === 'prevalidated')) {
+      setShowResumePrompt(true)
+      return
+    }
+    openImportModalFresh()
+  }
+
+  const openImportModalFresh = () => {
     const lastId = state.lastSelectedSchemeId
     const lastChange = state.lastSchemeChange
 
@@ -309,21 +415,53 @@ function SampleReceive() {
     setImportedResult(null)
     setPendingCSVContent(null)
     setPendingFileName(null)
+    setActiveTaskId(null)
     setShowImportModal(true)
   }
 
-  const runPrevalidation = (csvContent: string, batchId: string, schemeId: string) => {
-    const scheme = state.importSchemes.find((s) => s.id === schemeId)
-    let rows: { sampleNo: string; quantity: string; source: string }[]
-    if (scheme) {
-      rows = parseCSVWithScheme(csvContent, scheme.columnMappings)
-    } else {
-      rows = parseCSV(csvContent)
+  const handleResumeActiveTask = () => {
+    const lastTaskId = state.lastActiveTaskId
+    if (!lastTaskId) {
+      openImportModalFresh()
+      setShowResumePrompt(false)
+      return
     }
-    const toggles: ValidationToggles | undefined = scheme ? scheme.validationToggles : undefined
-    const result = prevalidateImportCSV(batchId, rows, toggles)
-    setPrevalidateResult(result)
+    const task = state.importTasks.find((t) => t.id === lastTaskId)
+    if (!task) {
+      setLastActiveTask(null)
+      openImportModalFresh()
+      setShowResumePrompt(false)
+      return
+    }
+    const draft = task.draftState
+    setActiveTaskId(task.id)
+    setSelectedSchemeId(draft.selectedSchemeId || '')
+    if (draft.selectedBatchId) {
+      setSelectedBatchId(draft.selectedBatchId)
+    }
+    setPendingCSVContent(draft.csvContent)
+    setPendingFileName(draft.fileName)
+    if (draft.csvContent && draft.selectedBatchId) {
+      setPrevalidateResult(draft.prevalidateSummary)
+    } else {
+      setPrevalidateResult(null)
+    }
     setImportedResult(null)
+    setSchemeChangeNotice(null)
+    setShowResumePrompt(false)
+    setShowImportModal(true)
+    setSuccessMsg(`已恢复任务「${task.taskName}」的现场`)
+    setTimeout(() => setSuccessMsg(''), 4000)
+  }
+
+  const handleDismissResume = () => {
+    setLastActiveTask(null)
+    setShowResumePrompt(false)
+    openImportModalFresh()
+  }
+
+  const runPrevalidation = (csvContent: string, batchId: string, schemeId: string) => {
+    runPrevalidationPipeline(csvContent, batchId, schemeId)
   }
 
   const handleQuickCreateBatch = () => {
@@ -360,11 +498,28 @@ function SampleReceive() {
     setSuccessMsg(`已创建批次：${batch.batchNo}`)
 
     if (pendingCSVContent) {
-      runPrevalidation(pendingCSVContent, batch.id, selectedSchemeId)
+      setTimeout(() => {
+        runPrevalidation(pendingCSVContent, batch.id, selectedSchemeId)
+      }, 0)
+    }
+
+    if (activeTaskId) {
+      updateImportTaskDraft(activeTaskId, {
+        selectedBatchId: batch.id,
+      })
     }
   }
 
   const handleCloseImportModal = () => {
+    const hasUnsaved = (pendingCSVContent || prevalidateResult) && !activeTaskId && !importedResult
+    if (hasUnsaved) {
+      setShowSaveTaskPrompt(true)
+      return
+    }
+    doCloseImportModal()
+  }
+
+  const doCloseImportModal = () => {
     setShowImportModal(false)
     setPrevalidateResult(null)
     setImportedResult(null)
@@ -372,6 +527,8 @@ function SampleReceive() {
     clearLastSchemeChange()
     setPendingCSVContent(null)
     setPendingFileName(null)
+    setShowSaveTaskPrompt(false)
+    setTaskName('')
     if (selectedSchemeId) {
       const exists = state.importSchemes.find((s) => s.id === selectedSchemeId)
       if (exists) {
@@ -387,6 +544,12 @@ function SampleReceive() {
     }
   }
 
+  const handleDiscardAndClose = () => {
+    setActiveTaskId(null)
+    setLastActiveTask(null)
+    doCloseImportModal()
+  }
+
   const handleSchemeChange = (newSchemeId: string) => {
     setSelectedSchemeId(newSchemeId)
     setSchemeChangeNotice(null)
@@ -396,6 +559,11 @@ function SampleReceive() {
     }
     if (pendingCSVContent && selectedBatchId) {
       runPrevalidation(pendingCSVContent, selectedBatchId, newSchemeId)
+    }
+    if (activeTaskId) {
+      updateImportTaskDraft(activeTaskId, {
+        selectedSchemeId: newSchemeId || null,
+      })
     }
   }
 
@@ -438,16 +606,45 @@ function SampleReceive() {
     setSuccessMsg(`已导出方案「${scheme.name}」`)
   }
 
+  const handleRevertImport = () => {
+    const result = revertLastImport(revertReason.trim() || undefined)
+    if (result.success) {
+      setSuccessMsg(`撤销成功！已回滚 ${result.revertedCount} 条样本`)
+      setShowRevertConfirm(false)
+      setRevertReason('')
+      setTimeout(() => setSuccessMsg(''), 5000)
+    } else {
+      setErrorMsg(result.error || '撤销失败')
+    }
+  }
+
   const selectedScheme = state.importSchemes.find((s) => s.id === selectedSchemeId)
 
   const selectedBatch = state.batches.find((b) => b.id === selectedBatchId)
   const batchSamples = state.samples.filter((s) => s.batchId === selectedBatchId)
+
+  const activeTask = activeTaskId
+    ? state.importTasks.find((t) => t.id === activeTaskId)
+    : null
+
+  const lastActiveTaskObj = state.lastActiveTaskId
+    ? state.importTasks.find((t) => t.id === state.lastActiveTaskId)
+    : null
 
   return (
     <div>
       <div className="page-header">
         <h1 className="page-title">样本接收</h1>
         <div style={{ display: 'flex', gap: 8 }}>
+          {canRevertLastImport() && (
+            <button
+              className="btn btn-warning"
+              onClick={() => setShowRevertConfirm(true)}
+              title="撤销最近一次批量导入"
+            >
+              ↩️ 撤销最近导入
+            </button>
+          )}
           <button
             className="btn btn-success"
             onClick={handleOpenImportModal}
@@ -468,9 +665,52 @@ function SampleReceive() {
 
       <div style={{ marginBottom: 16, padding: 12, background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 4 }}>
         <span style={{ fontSize: 14, color: '#d48806' }}>
-          💡 <strong>提示：</strong>批量导入后，可在左侧菜单「📋 导入历史」中查看所有导入记录和逐条明细，关闭应用重启后仍可追溯。选择导入方案后，CSV 列映射、校验开关和默认批次将自动套用。
+          💡 <strong>提示：</strong>批量导入后，可在左侧菜单「🎯 导入任务中心」中管理所有导入任务（草稿可恢复、可审计），或在「📋 导入历史」查看所有导入记录。关闭应用重启后任务草稿和预检结果完整保留。
         </span>
       </div>
+
+      {activeTask && (
+        <div style={{
+          marginBottom: 16,
+          padding: '12px 16px',
+          background: '#ecf5ff',
+          border: '1px solid #b3d8ff',
+          borderRadius: 4,
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+        }}>
+          <div>
+            <span style={{ fontWeight: 600, color: '#409eff' }}>🎯 关联任务：</span>
+            <span style={{ color: '#303133' }}>{activeTask.taskName}</span>
+            <span style={{
+              marginLeft: 8,
+              padding: '2px 8px',
+              background: '#ecf5ff',
+              border: '1px solid #b3d8ff',
+              borderRadius: 3,
+              fontSize: 12,
+              color: '#409eff',
+            }}>
+              {activeTask.status === 'draft' ? '草稿' : activeTask.status === 'prevalidated' ? '已预检' : activeTask.status}
+            </span>
+            <span style={{ marginLeft: 12, fontSize: 12, color: '#909399' }}>
+              (配置修改、预检、导入结果均会自动同步到任务)
+            </span>
+          </div>
+          <button
+            className="btn btn-default btn-sm"
+            onClick={() => {
+              setActiveTaskId(null)
+              setLastActiveTask(null)
+              setSuccessMsg('已解除任务关联')
+              setTimeout(() => setSuccessMsg(''), 3000)
+            }}
+          >
+            解除关联
+          </button>
+        </div>
+      )}
 
       <div className="card">
         <div className="form-group">
@@ -626,12 +866,196 @@ function SampleReceive() {
         </div>
       )}
 
+      {showResumePrompt && lastActiveTaskObj && (
+        <div className="modal-overlay" onClick={handleDismissResume}>
+          <div className="modal" onClick={(e) => e.stopPropagation()} style={{ width: 480 }}>
+            <div className="modal-header">
+              <div className="modal-title">检测到未完成的导入任务</div>
+              <div className="modal-close" onClick={handleDismissResume}>×</div>
+            </div>
+            <div className="modal-body">
+              <div style={{
+                padding: 16,
+                background: '#ecf5ff',
+                border: '1px solid #b3d8ff',
+                borderRadius: 4,
+                marginBottom: 12,
+              }}>
+                <div style={{ marginBottom: 6 }}>
+                  <strong>任务名称：</strong>{lastActiveTaskObj.taskName}
+                </div>
+                <div style={{ marginBottom: 6 }}>
+                  <strong>当前状态：</strong>
+                  <span style={{
+                    padding: '2px 8px',
+                    background: '#ecf5ff',
+                    color: '#409eff',
+                    borderRadius: 3,
+                    fontSize: 12,
+                  }}>
+                    {lastActiveTaskObj.status === 'draft' ? '草稿中' : lastActiveTaskObj.status === 'prevalidated' ? '已预检' : lastActiveTaskObj.status}
+                  </span>
+                </div>
+                <div style={{ marginBottom: 6 }}>
+                  <strong>批次：</strong>{lastActiveTaskObj.batchNo || (lastActiveTaskObj.batchId ? state.batches.find((b) => b.id === lastActiveTaskObj.batchId)?.batchNo : '未选择') || '未选择'}
+                </div>
+                <div style={{ marginBottom: 6 }}>
+                  <strong>方案：</strong>{lastActiveTaskObj.schemeName || '无'}
+                </div>
+                {lastActiveTaskObj.draftState.fileName && (
+                  <div style={{ marginBottom: 6 }}>
+                    <strong>CSV 文件：</strong>{lastActiveTaskObj.draftState.fileName}
+                  </div>
+                )}
+                {lastActiveTaskObj.draftState.prevalidateSummary && (
+                  <div>
+                    <strong>预检结果：</strong>
+                    共{lastActiveTaskObj.draftState.prevalidateSummary.total}条，
+                    有效{lastActiveTaskObj.draftState.prevalidateSummary.validCount}条，
+                    无效{lastActiveTaskObj.draftState.prevalidateSummary.invalidCount}条
+                  </div>
+                )}
+                <div style={{ marginTop: 8, fontSize: 12, color: '#909399' }}>
+                  创建人：{lastActiveTaskObj.createdBy} · 更新时间：{new Date(lastActiveTaskObj.updatedAt).toLocaleString('zh-CN')}
+                </div>
+              </div>
+              <div style={{ fontSize: 13, color: '#606266' }}>
+                选择「恢复继续」将自动载入以上所有现场配置（CSV文件、映射、预检结果等），直接回到离开时的流程继续操作。
+              </div>
+            </div>
+            <div className="modal-footer">
+              <button className="btn btn-default" onClick={handleDismissResume}>
+                开始新导入
+              </button>
+              <button className="btn btn-primary" onClick={handleResumeActiveTask}>
+                ▶ 恢复继续
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showSaveTaskPrompt && !activeTaskId && (
+        <div className="modal-overlay" onClick={() => setShowSaveTaskPrompt(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <div className="modal-title">保存为任务草稿？</div>
+              <div className="modal-close" onClick={() => setShowSaveTaskPrompt(false)}>×</div>
+            </div>
+            <div className="modal-body">
+              <div style={{
+                padding: 12,
+                background: '#fff7e6',
+                border: '1px solid #ffd591',
+                borderRadius: 4,
+                marginBottom: 12,
+                fontSize: 13,
+                color: '#d46b08',
+              }}>
+                ⚠️ 检测到您有未保存的配置：
+                {pendingCSVContent && <> 已选择CSV文件「{pendingFileName}」</>}
+                {prevalidateResult && <>、预检结果已生成</>}
+                ，是否保存为任务草稿？
+                <div style={{ marginTop: 4, fontSize: 12, color: '#873800' }}>
+                  保存后可在「导入任务中心」跨重启恢复，继续后续操作。
+                </div>
+              </div>
+              <div className="form-group">
+                <label className="form-label">任务名称（可选）</label>
+                <input
+                  type="text"
+                  className="form-input"
+                  value={taskName}
+                  onChange={(e) => setTaskName(e.target.value)}
+                  placeholder={`留空则自动生成：导入任务_${new Date().toLocaleString('zh-CN')}`}
+                />
+              </div>
+            </div>
+            <div className="modal-footer">
+              <button className="btn btn-default" onClick={handleDiscardAndClose}>
+                不保存，直接关闭
+              </button>
+              <button className="btn btn-primary" onClick={handleSaveToTask}>
+                💾 保存并关闭
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showRevertConfirm && (
+        <div className="modal-overlay" onClick={() => { setShowRevertConfirm(false); setRevertReason('') }}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <div className="modal-title">撤销最近一次导入</div>
+              <div className="modal-close" onClick={() => { setShowRevertConfirm(false); setRevertReason('') }}>×</div>
+            </div>
+            <div className="modal-body">
+              <div style={{
+                padding: 12,
+                background: '#fff1f0',
+                border: '1px solid #ffa39e',
+                borderRadius: 4,
+                marginBottom: 12,
+                fontSize: 13,
+                color: '#cf1322',
+              }}>
+                ⚠️ 此操作将永久删除最近一次批量导入成功的所有样本及其台账记录，此操作不可恢复。
+              </div>
+              <div className="form-group">
+                <label className="form-label">撤销原因（可选）</label>
+                <textarea
+                  className="form-textarea"
+                  rows={3}
+                  value={revertReason}
+                  onChange={(e) => setRevertReason(e.target.value)}
+                  placeholder="例如：导入错误、重复导入等..."
+                />
+              </div>
+            </div>
+            <div className="modal-footer">
+              <button className="btn btn-default" onClick={() => { setShowRevertConfirm(false); setRevertReason('') }}>
+                取消
+              </button>
+              <button className="btn btn-danger" onClick={handleRevertImport}>
+                确认撤销（不可恢复）
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showImportModal && (
         <div className="modal-overlay" onClick={handleCloseImportModal}>
           <div className="modal" onClick={(e) => e.stopPropagation()} style={{ width: 700, maxWidth: '90vw' }}>
             <div className="modal-header">
-              <div className="modal-title">CSV 批量导入样本</div>
-              <div className="modal-close" onClick={handleCloseImportModal}>×</div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <div className="modal-title" style={{ margin: 0 }}>CSV 批量导入样本</div>
+                {activeTask && (
+                  <span style={{
+                    padding: '2px 10px',
+                    background: '#ecf5ff',
+                    border: '1px solid #b3d8ff',
+                    borderRadius: 3,
+                    fontSize: 12,
+                    color: '#409eff',
+                  }}>
+                    🎯 {activeTask.taskName}
+                  </span>
+                )}
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                {!activeTaskId && !importedResult && (
+                  <button
+                    className="btn btn-default btn-sm"
+                    onClick={() => setShowSaveTaskPrompt(true)}
+                    title="保存当前配置为任务草稿（可跨重启恢复）"
+                  >
+                    💾 存为任务
+                  </button>
+                )}
+                <div className="modal-close" onClick={handleCloseImportModal}>×</div>
+              </div>
             </div>
             <div className="modal-body">
               {!prevalidateResult ? (
@@ -692,7 +1116,7 @@ function SampleReceive() {
                       </div>
                       {pendingFileName && (
                         <div style={{ marginTop: 10, fontSize: 12, color: '#666' }}>
-                          ✓ 已选择文件：{pendingFileName}（创建批次后将自动预检）
+                          ✓ 已选择文件：{pendingFileName}（创建批次后将自动预检，<strong>现场状态完整保留</strong>）
                         </div>
                       )}
                     </div>
@@ -742,7 +1166,7 @@ function SampleReceive() {
                       <div><strong>方案：</strong>{selectedScheme.name}</div>
                       <div><strong>列映射：</strong>{selectedScheme.columnMappings.map((m) => `${m.csvColumn}→${m.targetField}`).join('、')}</div>
                       <div><strong>批次号模式：</strong>{selectedScheme.defaultBatch.batchNoPattern || '未设置'}</div>
-                      <div><strong>已启用校验：</strong>{
+                      <div><strong>已启用校验（拦截）：</strong>{
                         Object.entries(selectedScheme.validationToggles)
                           .filter(([, v]) => !v)
                           .map(([k]) => {
@@ -755,7 +1179,7 @@ function SampleReceive() {
                             }
                             return labels[k] || k
                           })
-                          .join('、') || '无'
+                          .join('、') || '无（全部跳过）'
                       }</div>
                       <div><strong>已关闭校验（跳过）：</strong>{
                         Object.entries(selectedScheme.validationToggles)
@@ -770,7 +1194,7 @@ function SampleReceive() {
                             }
                             return labels[k] || k
                           })
-                          .join('、') || '无'
+                          .join('、') || '无（严格校验）'
                       }</div>
                     </div>
                   )}
@@ -857,6 +1281,7 @@ function SampleReceive() {
                       borderRadius: 4,
                     }}>
                       <strong>✅ 导入完成！</strong> 成功 {importedResult.successCount} 条，失败 {importedResult.failedCount} 条
+                      {activeTaskId && <>（结果已同步到任务中心）</>}
                     </div>
                   )}
                 </div>
@@ -876,6 +1301,12 @@ function SampleReceive() {
                   setPrevalidateResult(null)
                   if (fileInputRef.current) {
                     fileInputRef.current.value = ''
+                  }
+                  if (activeTaskId) {
+                    updateImportTaskDraft(activeTaskId, {
+                      prevalidateSummary: null,
+                      parsedRows: null,
+                    }, 'draft')
                   }
                 }}>
                   重新选择文件
@@ -928,7 +1359,7 @@ function SampleReceive() {
               </div>
               {pendingFileName && (
                 <div style={{ padding: '10px', background: '#f0f7ff', borderRadius: 4, fontSize: 13 }}>
-                  ✓ 创建后将自动对已选文件「{pendingFileName}」进行预检
+                  ✓ 创建后将自动对已选文件「{pendingFileName}」进行预检，<strong>现场配置不丢失</strong>
                 </div>
               )}
               {selectedScheme && (
