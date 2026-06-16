@@ -37,6 +37,7 @@ type Action =
   | { type: 'ADD_SCHEME_MERGE_LOG'; payload: SchemeMergeLogEntry }
   | { type: 'SET_LAST_SCHEME_MERGE_ID'; mergeId: string | null }
   | { type: 'ADD_SCHEME_MERGE_SNAPSHOT'; payload: SchemeMergeSnapshot }
+  | { type: 'UPDATE_SCHEME_MERGE_SNAPSHOT'; payload: { mergeId: string; addedSchemeIds: string[] } }
   | { type: 'RESTORE_SCHEME_MERGE'; payload: { originalSchemes: ImportScheme[]; addedSchemeIds: string[] } }
 
 const defaultData: AppData = {
@@ -196,15 +197,26 @@ function appReducer(state: AppState, action: Action): AppState {
         ...state,
         schemeMergeSnapshots: [...state.schemeMergeSnapshots, action.payload],
       }
-    case 'RESTORE_SCHEME_MERGE':
+    case 'UPDATE_SCHEME_MERGE_SNAPSHOT':
       return {
         ...state,
-        importSchemes: [
-          ...state.importSchemes.filter((s) => !action.payload.addedSchemeIds.includes(s.id)),
-          ...action.payload.originalSchemes,
-        ],
+        schemeMergeSnapshots: state.schemeMergeSnapshots.map((s) =>
+          s.mergeId === action.payload.mergeId
+            ? { ...s, addedSchemeIds: action.payload.addedSchemeIds }
+            : s
+        ),
+      }
+    case 'RESTORE_SCHEME_MERGE': {
+      const existingIds = new Set(action.payload.originalSchemes.map((s) => s.id))
+      const filteredExisting = state.importSchemes.filter(
+        (s) => !action.payload.addedSchemeIds.includes(s.id) && !existingIds.has(s.id)
+      )
+      return {
+        ...state,
+        importSchemes: [...filteredExisting, ...action.payload.originalSchemes],
         lastSchemeMergeId: null,
       }
+    }
     default:
       return state
   }
@@ -383,6 +395,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
         merged.lastActiveTaskId = null
       }
     }
+
+    merged.importSchemes = merged.importSchemes.map((s) => ({
+      remark: '',
+      ...s,
+    }))
 
     return merged
   }
@@ -1116,6 +1133,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }
 
   const createImportScheme = (name: string, opts?: {
+    remark?: string
     columnMappings?: ColumnMapping[]
     defaultBatch?: DefaultBatchInfo
     validationToggles?: ValidationToggles
@@ -1126,6 +1144,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     const scheme: ImportScheme = {
       id: uuidv4(),
       name,
+      remark: opts?.remark || '',
       columnMappings: opts?.columnMappings || [
         { csvColumn: '样本编号', targetField: 'sampleNo' },
         { csvColumn: '数量', targetField: 'quantity' },
@@ -1269,6 +1288,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
           }
           const updated: ImportScheme = {
             ...scheme,
+            remark: (scheme as any).remark || '',
             id: existingByName.id,
             createdById: existingByName.createdById,
             createdBy: existingByName.createdBy,
@@ -1285,6 +1305,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       }
       const newScheme: ImportScheme = {
         ...scheme,
+        remark: (scheme as any).remark || '',
         id: uuidv4(),
         createdBy: user?.username || '未知',
         createdById: state.currentUserId || '',
@@ -1522,6 +1543,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }
 
   const FIELD_LABELS: Record<SchemeMergeableFieldName, string> = {
+    remark: '备注',
     columnMappings: '列映射',
     'defaultBatch.batchNoPattern': '默认批次号模式',
     'defaultBatch.batchNamePattern': '默认批次名称模式',
@@ -1534,8 +1556,23 @@ export function AppProvider({ children }: { children: ReactNode }) {
     isLocked: '锁定状态',
   }
 
+  const ALL_MERGEABLE_FIELDS: SchemeMergeableFieldName[] = [
+    'remark',
+    'columnMappings',
+    'defaultBatch.batchNoPattern',
+    'defaultBatch.batchNamePattern',
+    'validationToggles.skipEmptySampleNo',
+    'validationToggles.skipDuplicateInFile',
+    'validationToggles.skipDuplicateInBatch',
+    'validationToggles.skipInvalidQuantity',
+    'validationToggles.skipEmptySource',
+    'isShared',
+    'isLocked',
+  ]
+
   const getFieldValue = (scheme: ImportScheme, fieldName: SchemeMergeableFieldName): unknown => {
     switch (fieldName) {
+      case 'remark': return scheme.remark
       case 'columnMappings': return scheme.columnMappings
       case 'defaultBatch.batchNoPattern': return scheme.defaultBatch.batchNoPattern
       case 'defaultBatch.batchNamePattern': return scheme.defaultBatch.batchNamePattern
@@ -1582,18 +1619,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
     const conflictItems: SchemeMergeConflictItem[] = []
     const newSchemes: ImportScheme[] = []
-    const allFieldNames: SchemeMergeableFieldName[] = [
-      'columnMappings',
-      'defaultBatch.batchNoPattern',
-      'defaultBatch.batchNamePattern',
-      'validationToggles.skipEmptySampleNo',
-      'validationToggles.skipDuplicateInFile',
-      'validationToggles.skipDuplicateInBatch',
-      'validationToggles.skipInvalidQuantity',
-      'validationToggles.skipEmptySource',
-      'isShared',
-      'isLocked',
-    ]
 
     for (const incoming of importData.schemes) {
       const existing = state.importSchemes.find((s) => s.name === incoming.name)
@@ -1618,7 +1643,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         }
       }
 
-      const fieldDiffs: SchemeMergeFieldDiff[] = allFieldNames.map((fieldName) => {
+      const fieldDiffs: SchemeMergeFieldDiff[] = ALL_MERGEABLE_FIELDS.map((fieldName) => {
         const originalValue = getFieldValue(existing, fieldName)
         const newValue = getFieldValue(incoming, fieldName)
         const isSame = JSON.stringify(originalValue) === JSON.stringify(newValue)
@@ -1660,6 +1685,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const setFieldValue = (scheme: ImportScheme, fieldName: SchemeMergeableFieldName, value: unknown): ImportScheme => {
     switch (fieldName) {
+      case 'remark': return { ...scheme, remark: value as string }
       case 'columnMappings': return { ...scheme, columnMappings: value as ColumnMapping[] }
       case 'defaultBatch.batchNoPattern': return { ...scheme, defaultBatch: { ...scheme.defaultBatch, batchNoPattern: value as string } }
       case 'defaultBatch.batchNamePattern': return { ...scheme, defaultBatch: { ...scheme.defaultBatch, batchNamePattern: value as string } }
@@ -1720,6 +1746,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       const newScheme: ImportScheme = {
         ...newSchemeData,
         id: uuidv4(),
+        remark: (newSchemeData as any).remark || '',
         createdBy: user?.username || '未知',
         createdById: state.currentUserId || '',
         createdAt: new Date().toISOString(),
@@ -1747,6 +1774,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
       })
       newCount++
     }
+
+    dispatch({
+      type: 'UPDATE_SCHEME_MERGE_SNAPSHOT',
+      payload: { mergeId, addedSchemeIds },
+    })
 
     for (const item of preview.conflictItems) {
       if (!item.canMerge) {

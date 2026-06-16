@@ -136,6 +136,7 @@ export interface DefaultBatchInfo {
 export interface ImportScheme {
   id: string
   name: string
+  remark: string
   columnMappings: ColumnMapping[]
   defaultBatch: DefaultBatchInfo
   validationToggles: ValidationToggles
@@ -165,6 +166,7 @@ export type ConflictResolution = 'overwrite' | 'skip' | 'merge'
 export type MergeFieldResolution = 'keep_original' | 'use_new' | 'conflict'
 
 export type SchemeMergeableFieldName =
+  | 'remark'
   | 'columnMappings'
   | 'defaultBatch.batchNoPattern'
   | 'defaultBatch.batchNamePattern'

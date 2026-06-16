@@ -858,6 +858,17 @@ function ImportSchemeManager() {
               <div className="modal-close" onClick={() => setEditingScheme(null)}>×</div>
             </div>
             <div className="modal-body">
+              <h4 style={{ marginBottom: 12 }}>备注</h4>
+              <div style={{ marginBottom: 16 }}>
+                <textarea
+                  className="form-input"
+                  style={{ width: '100%', minHeight: 60, resize: 'vertical' }}
+                  value={(editingScheme as any).remark || ''}
+                  onChange={(e) => setEditingScheme({ ...editingScheme, remark: e.target.value } as any)}
+                  placeholder="可选：备注说明，如方案用途、变更历史等"
+                />
+              </div>
+
               <h4 style={{ marginBottom: 12 }}>列映射</h4>
               <div style={{ marginBottom: 16 }}>
                 {editingScheme.columnMappings.map((mapping, idx) => (
@@ -1114,6 +1125,11 @@ function SchemeCard({
             更新于：{new Date(scheme.updatedAt).toLocaleString('zh-CN')}
           </span>
         </div>
+        {(scheme as any).remark && (
+          <div style={{ fontSize: 12, color: '#555', marginLeft: 22, marginTop: 4, fontStyle: 'italic' }}>
+            备注：{(scheme as any).remark}
+          </div>
+        )}
         <div style={{ fontSize: 12, color: '#666', marginLeft: 22, marginTop: 4 }}>
           已启用校验：
           {Object.entries(scheme.validationToggles)

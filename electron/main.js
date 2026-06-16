@@ -32,6 +32,9 @@ const defaultData = {
   lastActiveTaskId: null,
   rollbackSnapshots: [],
   lastImportId: null,
+  schemeMergeLogs: [],
+  lastSchemeMergeId: null,
+  schemeMergeSnapshots: [],
 }
 
 function mergeWithDefaults(data) {
@@ -40,7 +43,10 @@ function mergeWithDefaults(data) {
     ...data,
     importResults: data.importResults || [],
     batchLedger: data.batchLedger || [],
-    importSchemes: data.importSchemes || [],
+    importSchemes: (data.importSchemes || []).map((s) => ({
+      remark: '',
+      ...s,
+    })),
     schemeAuditLog: data.schemeAuditLog || [],
     lastSelectedSchemeId: data.lastSelectedSchemeId || null,
     lastSchemeChange: data.lastSchemeChange || null,
@@ -57,6 +63,9 @@ function mergeWithDefaults(data) {
     lastActiveTaskId: data.lastActiveTaskId || null,
     rollbackSnapshots: data.rollbackSnapshots || [],
     lastImportId: data.lastImportId || null,
+    schemeMergeLogs: data.schemeMergeLogs || [],
+    lastSchemeMergeId: data.lastSchemeMergeId || null,
+    schemeMergeSnapshots: data.schemeMergeSnapshots || [],
     samples: (data.samples || []).map((s) => ({
       ...s,
       history: s.history || [],
