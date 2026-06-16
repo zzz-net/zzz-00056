@@ -76,6 +76,10 @@ export interface ImportResult {
   successCount: number
   failedCount: number
   details: ImportResultDetail[]
+  schemeId?: string
+  schemeName?: string
+  validationToggles?: ValidationToggles
+  columnMappings?: ColumnMapping[]
 }
 
 export interface BatchLedgerEntry {

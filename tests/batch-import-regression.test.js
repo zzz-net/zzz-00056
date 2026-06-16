@@ -206,7 +206,7 @@ function addSample(state, sampleData) {
   return { newState, sample };
 }
 
-function batchImportSamples(state, batchId, validatedRows) {
+function batchImportSamples(state, batchId, validatedRows, opts) {
   const validRows = validatedRows.filter((r) => r.valid);
   const invalidRows = validatedRows.filter((r) => !r.valid);
   const importId = uuidv4();
@@ -223,6 +223,10 @@ function batchImportSamples(state, batchId, validatedRows) {
     successCount: 0,
     failedCount: 0,
     details: [],
+    ...(opts?.schemeId && { schemeId: opts.schemeId }),
+    ...(opts?.schemeName && { schemeName: opts.schemeName }),
+    ...(opts?.validationToggles && { validationToggles: opts.validationToggles }),
+    ...(opts?.columnMappings && { columnMappings: opts.columnMappings }),
   };
 
   for (const row of invalidRows) {
@@ -1503,23 +1507,23 @@ function prevalidateImportCSVWithToggles(state, batchId, csvRows, validationTogg
     const warnings = [];
     const cleanSampleNo = row.sampleNo.trim();
 
-    if (toggles.skipEmptySampleNo && !cleanSampleNo) {
+    if (!toggles.skipEmptySampleNo && !cleanSampleNo) {
       errors.push('样本编号不能为空');
     }
-    if (toggles.skipInvalidQuantity && (!row.quantity || isNaN(parseInt(row.quantity)) || parseInt(row.quantity) < 1)) {
+    if (!toggles.skipInvalidQuantity && (!row.quantity || isNaN(parseInt(row.quantity)) || parseInt(row.quantity) < 1)) {
       errors.push('数量必须为大于0的数字');
     }
-    if (toggles.skipEmptySource && !row.source.trim()) {
+    if (!toggles.skipEmptySource && !row.source.trim()) {
       errors.push('样本来源不能为空');
     }
 
     if (cleanSampleNo) {
-      if (toggles.skipDuplicateInFile && seenSampleNos.has(cleanSampleNo)) {
+      if (!toggles.skipDuplicateInFile && seenSampleNos.has(cleanSampleNo)) {
         errors.push(`CSV文件内存在重复的样本编号: ${cleanSampleNo}`);
       }
       seenSampleNos.add(cleanSampleNo);
 
-      if (toggles.skipDuplicateInBatch && checkDuplicateSampleNo(state, cleanSampleNo, batchId)) {
+      if (!toggles.skipDuplicateInBatch && checkDuplicateSampleNo(state, cleanSampleNo, batchId)) {
         errors.push(`该批次中已存在样本编号: ${cleanSampleNo}`);
       }
     }
@@ -1582,7 +1586,7 @@ assert(rows24[0].sampleNo === 'S-001', '表头"编号"不被当成样本编号')
 assert(rows24[0].quantity === '5', '列映射quantity正确');
 assert(rows24[0].source === '内科', '列映射source正确');
 
-console.log('\n【测试25】校验开关 - skipEmptySource=false 时空来源不拦截');
+console.log('\n【测试25】校验开关 - skipEmptySource=false 时空来源校验启用（拦截空来源）');
 let state25x = createSchemeInitialState();
 const { state: s25x, batch: batch25 } = createBatch(state25x, 'BATCH-25', '测试批次25');
 state25x = s25x;
@@ -1592,15 +1596,15 @@ const toggles25 = {
 };
 const row25a = { sampleNo: 'S-001', quantity: '5', source: '' };
 const preVal25a = prevalidateImportCSVWithToggles(state25x, batch25.id, [row25a], toggles25);
-assert(preVal25a.results[0].valid === true, '空来源不拦截，该行valid=true');
-assert(!preVal25a.results[0].errors.some((e) => e.includes('来源')), '不因空来源报错');
+assert(preVal25a.results[0].valid === false, 'skipEmptySource=false时空来源被拦截，valid=false');
+assert(preVal25a.results[0].errors.some((e) => e.includes('样本来源不能为空')), '因空来源报错');
 const row25b = { sampleNo: 'S-002', quantity: '', source: '' };
 const preVal25b = prevalidateImportCSVWithToggles(state25x, batch25.id, [row25b], toggles25);
-assert(preVal25b.results[0].valid === false, '无效数量仍报错');
-assert(preVal25b.results[0].errors.some((e) => e.includes('数量')), '因无效数量报错');
-assert(!preVal25b.results[0].errors.some((e) => e.includes('来源')), '不因空来源报错');
+assert(preVal25b.results[0].valid === false, '空来源仍然报错');
+assert(preVal25b.results[0].errors.some((e) => e.includes('样本来源不能为空')), '因空来源报错');
+assert(!preVal25b.results[0].errors.some((e) => e.includes('数量')), '无效数量校验已跳过（skipInvalidQuantity=true）');
 
-console.log('\n【测试26】校验开关 - skipDuplicateInFile=false 时文件内重复不拦截');
+console.log('\n【测试26】校验开关 - skipDuplicateInFile=false 时文件内重复校验启用（拦截重复）');
 let state26x = createSchemeInitialState();
 const { state: s26x, batch: batch26 } = createBatch(state26x, 'BATCH-26', '测试批次26');
 state26x = s26x;
@@ -1614,9 +1618,10 @@ const rows26 = [
 ];
 const preVal26 = prevalidateImportCSVWithToggles(state26x, batch26.id, rows26, toggles26);
 assert(preVal26.results[0].valid === true, 'skipDuplicateInFile=false时第一行valid');
-assert(preVal26.results[1].valid === true, 'skipDuplicateInFile=false时第二行也valid（文件内重复不拦截）');
+assert(preVal26.results[1].valid === false, 'skipDuplicateInFile=false时第二行被拦截（文件内重复）');
+assert(preVal26.results[1].errors.some((e) => e.includes('重复的样本编号')), '重复编号报错信息正确');
 
-console.log('\n【测试27】校验开关 - skipEmptySampleNo=false 时空编号不拦截');
+console.log('\n【测试27】校验开关 - skipEmptySampleNo=false 时空编号校验启用（拦截空编号）');
 let state27x = createSchemeInitialState();
 const { state: s27x, batch: batch27 } = createBatch(state27x, 'BATCH-27', '测试批次27');
 state27x = s27x;
@@ -1628,7 +1633,8 @@ const rows27 = [
   { sampleNo: '', quantity: '5', source: '内科' },
 ];
 const preVal27 = prevalidateImportCSVWithToggles(state27x, batch27.id, rows27, toggles27);
-assert(preVal27.results[0].valid === true, 'skipEmptySampleNo=false时空编号行valid=true');
+assert(preVal27.results[0].valid === false, 'skipEmptySampleNo=false时空编号被拦截，valid=false');
+assert(preVal27.results[0].errors.some((e) => e.includes('样本编号不能为空')), '空编号报错信息正确');
 
 console.log('\n【测试28】默认批次模式解析 resolveDefaultBatch');
 const todayStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
@@ -1774,7 +1780,8 @@ assert(parsedRows32[1].source === '外科', '第二行source正确');
 const { state: s32b, batch: batch32 } = createBatch(state32, 'BATCH-32', '链路测试批次');
 state32 = s32b;
 const preVal32 = prevalidateImportCSVWithToggles(state32, batch32.id, parsedRows32, schemeForCSV32.validationToggles);
-assert(preVal32.results[0].valid === true, '第1行校验通过（skipEmptySource=false空来源不拦截）');
+assert(preVal32.results[0].valid === false, '第1行校验不通过（skipEmptySource=false空来源被拦截）');
+assert(preVal32.results[0].errors.some((e) => e.includes('样本来源不能为空')), '第1行空来源报错');
 assert(preVal32.results[1].valid === true, '第2行校验通过');
 assert(preVal32.results[0].sampleNo === 'C-001', '预检结果sampleNo正确');
 
@@ -1889,6 +1896,214 @@ state43 = schemeReducer(state43, { type: 'SET_LAST_SELECTED_SCHEME', schemeId: s
 assert(state43.lastSelectedSchemeId === scheme43.id, 'lastSelectedSchemeId已设置');
 state43 = schemeReducer(state43, { type: 'DELETE_IMPORT_SCHEME', schemeId: scheme43.id });
 assert(state43.lastSelectedSchemeId === null, '删除方案后lastSelectedSchemeId被reducer清空');
+
+console.log('\n========== 新增：校验规则一致性 回归测试 ==========\n');
+
+console.log('【测试44】校验开关逻辑 - skipEmptySource=true 时跳过空来源校验（不拦截）');
+let state44 = createSchemeInitialState();
+const { state: s44, scheme: scheme44 } = createImportScheme(state44, '允许空来源方案', {
+  validationToggles: {
+    ...defaultValidationToggles,
+    skipEmptySource: true,
+  },
+});
+state44 = s44;
+const { state: s44b, batch: batch44 } = createBatch(state44, 'BATCH-44', '测试批次44');
+state44 = s44b;
+const rows44 = [
+  { sampleNo: 'S-44-01', quantity: '5', source: '' },
+  { sampleNo: 'S-44-02', quantity: '3', source: '内科' },
+];
+const preVal44 = prevalidateImportCSVWithToggles(state44, batch44.id, rows44, scheme44.validationToggles);
+assert(preVal44.results[0].valid === true, '第1行空来源不拦截，valid=true');
+assert(preVal44.results[0].errors.length === 0, '第1行无错误');
+assert(preVal44.results[1].valid === true, '第2行也通过');
+assert(preVal44.canImport === true, '可以导入');
+assert(preVal44.validCount === 2, '2条都有效');
+
+console.log('\n【测试45】校验开关逻辑 - skipEmptySource=false 时启用空来源校验（拦截）');
+let state45 = createSchemeInitialState();
+const { state: s45, scheme: scheme45 } = createImportScheme(state45, '禁止空来源方案', {
+  validationToggles: {
+    ...defaultValidationToggles,
+    skipEmptySource: false,
+  },
+});
+state45 = s45;
+const { state: s45b, batch: batch45 } = createBatch(state45, 'BATCH-45', '测试批次45');
+state45 = s45b;
+const rows45 = [
+  { sampleNo: 'S-45-01', quantity: '5', source: '' },
+  { sampleNo: 'S-45-02', quantity: '3', source: '内科' },
+];
+const preVal45 = prevalidateImportCSVWithToggles(state45, batch45.id, rows45, scheme45.validationToggles);
+assert(preVal45.results[0].valid === false, '第1行空来源被拦截，valid=false');
+assert(preVal45.results[0].errors.some(e => e.includes('样本来源不能为空')), '错误信息包含样本来源不能为空');
+assert(preVal45.results[1].valid === true, '第2行有来源通过');
+
+console.log('\n【测试46】校验开关持久化 - 保存配置重启后校验规则一致');
+let state46 = createSchemeInitialState();
+const { state: s46, scheme: scheme46 } = createImportScheme(state46, '持久化校验方案', {
+  validationToggles: {
+    ...defaultValidationToggles,
+    skipEmptySource: true,
+    skipEmptySampleNo: true,
+  },
+});
+state46 = s46;
+state46 = schemeReducer(state46, { type: 'SET_LAST_SELECTED_SCHEME', schemeId: scheme46.id });
+const serialized46 = JSON.stringify(state46);
+const restored46 = schemeReducer(createSchemeInitialState(), { type: 'SET_DATA', payload: JSON.parse(serialized46) });
+const restoredScheme46 = restored46.importSchemes.find(s => s.id === scheme46.id);
+assert(restoredScheme46 !== undefined, '重启后方案存在');
+assert(restoredScheme46.validationToggles.skipEmptySource === true, '重启后skipEmptySource=true（跳过空来源）');
+assert(restoredScheme46.validationToggles.skipEmptySampleNo === true, '重启后skipEmptySampleNo=true（跳过空编号）');
+assert(restoredScheme46.validationToggles.skipInvalidQuantity === true, '其他校验开关保持原值');
+assert(restored46.lastSelectedSchemeId === scheme46.id, '重启后lastSelectedSchemeId恢复');
+const { state: s46c, batch: batch46 } = createBatch(restored46, 'BATCH-46', '重启后批次');
+let state46c = s46c;
+const rows46 = [{ sampleNo: '', quantity: '5', source: '' }];
+const preVal46 = prevalidateImportCSVWithToggles(state46c, batch46.id, rows46, restoredScheme46.validationToggles);
+assert(preVal46.results[0].valid === true, '重启后空编号空来源都不拦截，valid=true');
+
+console.log('\n【测试47】导入结果记录方案信息 - schemeId、schemeName、校验开关、列映射');
+let state47 = createSchemeInitialState();
+const { state: s47, scheme: scheme47 } = createImportScheme(state47, '记录方案信息测试', {
+  columnMappings: [
+    { csvColumn: 'ID', targetField: 'sampleNo' },
+    { csvColumn: 'Qty', targetField: 'quantity' },
+    { csvColumn: 'Src', targetField: 'source' },
+  ],
+  validationToggles: {
+    ...defaultValidationToggles,
+    skipEmptySource: true,
+  },
+});
+state47 = s47;
+const { state: s47b, batch: batch47 } = createBatch(state47, 'BATCH-47', '记录方案批次');
+state47 = s47b;
+const csv47 = "ID,Qty,Src\nS-47-01,5,\nS-47-02,3,外科";
+const parsed47 = parseCSVWithScheme(csv47, scheme47.columnMappings);
+const preVal47 = prevalidateImportCSVWithToggles(state47, batch47.id, parsed47, scheme47.validationToggles);
+const import47 = batchImportSamples(state47, batch47.id, preVal47.results, {
+  schemeId: scheme47.id,
+  schemeName: scheme47.name,
+  validationToggles: scheme47.validationToggles,
+  columnMappings: scheme47.columnMappings,
+});
+state47 = import47.state;
+assert(import47.importResult !== undefined, '导入结果存在');
+assert(import47.importResult.schemeId === scheme47.id, '导入结果记录schemeId');
+assert(import47.importResult.schemeName === '记录方案信息测试', '导入结果记录schemeName');
+assert(import47.importResult.validationToggles !== undefined, '导入结果记录validationToggles');
+assert(import47.importResult.validationToggles.skipEmptySource === true, '导入结果记录的skipEmptySource正确');
+assert(import47.importResult.columnMappings !== undefined, '导入结果记录columnMappings');
+assert(import47.importResult.columnMappings.length === 3, '导入结果记录的列映射数量正确');
+assert(import47.importResult.columnMappings[0].csvColumn === 'ID', '导入结果记录的列映射内容正确');
+assert(import47.importResult.successCount === 2, '2条都导入成功');
+
+console.log('\n【测试48】导入结果持久化后重启后方案信息仍可追溯');
+const serialized47 = JSON.stringify(state47);
+const restored47 = schemeReducer(createInitialState(), { type: 'SET_DATA', payload: JSON.parse(serialized47) });
+const restoredImport47 = restored47.importResults[0];
+assert(restoredImport47 !== undefined, '重启后导入结果存在');
+assert(restoredImport47.schemeId === scheme47.id, '重启后schemeId保留');
+assert(restoredImport47.schemeName === '记录方案信息测试', '重启后schemeName保留');
+assert(restoredImport47.validationToggles.skipEmptySource === true, '重启后校验开关保留');
+assert(restoredImport47.columnMappings[0].csvColumn === 'ID', '重启后列映射保留');
+
+console.log('\n【测试49】批量导入 - 预检、正式导入使用同一套校验规则');
+let state49 = createSchemeInitialState();
+const { state: s49, scheme: scheme49 } = createImportScheme(state49, '同一套规则测试', {
+  validationToggles: {
+    ...defaultValidationToggles,
+    skipEmptySource: true,
+    skipDuplicateInFile: true,
+  },
+});
+state49 = s49;
+const { state: s49b, batch: batch49 } = createBatch(state49, 'BATCH-49', '同一规则批次');
+state49 = s49b;
+const rows49 = [
+  { sampleNo: 'S-49-01', quantity: '5', source: '' },
+  { sampleNo: 'S-49-01', quantity: '3', source: '' },
+  { sampleNo: 'S-49-02', quantity: '10', source: '内科' },
+];
+const preVal49 = prevalidateImportCSVWithToggles(state49, batch49.id, rows49, scheme49.validationToggles);
+assert(preVal49.validCount === 3, '预检时空来源、文件内重复都不拦截，3条都有效');
+const import49 = batchImportSamples(state49, batch49.id, preVal49.results, {
+  schemeId: scheme49.id,
+  schemeName: scheme49.name,
+});
+state49 = import49.state;
+assert(import49.importResult.successCount === 3, '正式导入时也使用同一规则，3条都成功');
+assert(import49.importResult.failedCount === 0, '正式导入无失败');
+const sample49a = state49.samples.find(s => s.sampleNo === 'S-49-01' && s.source === '');
+assert(sample49a !== undefined, '空来源样本成功导入数据库');
+const duplicateSample49 = state49.samples.filter(s => s.sampleNo === 'S-49-01');
+assert(duplicateSample49.length === 2, '文件内重复编号也成功导入（2条）');
+
+console.log('\n【测试50】完整链路：创建方案→关闭校验→保存→重启→导入→再导出→再导入冲突提示');
+let state50 = createSchemeInitialState();
+state50.currentUserId = 'user-1';
+const { state: s50a, scheme: scheme50 } = createImportScheme(state50, '完整测试方案', {
+  columnMappings: [
+    { csvColumn: '样本编号', targetField: 'sampleNo' },
+    { csvColumn: '数量', targetField: 'quantity' },
+    { csvColumn: '来源', targetField: 'source' },
+  ],
+  defaultBatch: { batchNoPattern: 'BATCH-{DATE}', batchNamePattern: '日常送检' },
+  validationToggles: {
+    ...defaultValidationToggles,
+    skipEmptySource: true,
+  },
+});
+state50 = s50a;
+assert(scheme50.validationToggles.skipEmptySource === true, '方案配置skipEmptySource=true');
+state50 = schemeReducer(state50, { type: 'SET_LAST_SELECTED_SCHEME', schemeId: scheme50.id });
+const serialized50 = JSON.stringify(state50);
+const restored50 = schemeReducer(createSchemeInitialState(), { type: 'SET_DATA', payload: JSON.parse(serialized50) });
+const restoredScheme50 = restored50.importSchemes.find(s => s.id === scheme50.id);
+assert(restoredScheme50.validationToggles.skipEmptySource === true, '重启后skipEmptySource仍为true');
+assert(restored50.lastSelectedSchemeId === scheme50.id, '重启后方案仍被选中');
+const export50 = exportSchemesJSON(restored50, [scheme50.id]);
+let state50b = export50.state;
+const json50 = export50.json;
+const delete50 = deleteImportScheme(state50b, scheme50.id);
+state50b = delete50.state;
+assert(state50b.importSchemes.length === 0, '删除后无方案');
+const import50a = importSchemesJSON(state50b, json50, 'skip');
+assert(import50a.importedCount === 1, '导入1个方案');
+state50b = import50a.state;
+const import50b = importSchemesJSON(state50b, json50, 'skip');
+assert(import50b.skippedCount === 1, '同名冲突skip模式跳过1个');
+state50b = import50b.state;
+const import50c = importSchemesJSON(state50b, json50, 'overwrite');
+assert(import50c.overwrittenCount === 1, '同名冲突overwrite模式覆盖1个');
+state50b = import50c.state;
+const reimportedScheme50 = state50b.importSchemes[0];
+assert(reimportedScheme50.createdById === 'user-1', '覆盖后createdById保留为user-1');
+const { state: s50c, batch: batch50 } = createBatch(state50b, 'BATCH-50', '完整链路批次');
+let state50c = s50c;
+const csv50 = '样本编号,数量,来源\nS-50-01,5,\nS-50-02,3,外科\nS-50-03,10,';
+const parsed50 = parseCSVWithScheme(csv50, reimportedScheme50.columnMappings);
+assert(parsed50.length === 3, 'CSV解析出3行');
+const preVal50 = prevalidateImportCSVWithToggles(state50c, batch50.id, parsed50, reimportedScheme50.validationToggles);
+assert(preVal50.validCount === 3, '3行都通过（空来源不拦截）');
+const import50d = batchImportSamples(state50c, batch50.id, preVal50.results, {
+  schemeId: reimportedScheme50.id,
+  schemeName: reimportedScheme50.name,
+  validationToggles: reimportedScheme50.validationToggles,
+  columnMappings: reimportedScheme50.columnMappings,
+});
+state50c = import50d.state;
+assert(import50d.importResult.successCount === 3, '正式导入3条成功');
+assert(import50d.importResult.schemeName === '完整测试方案', '导入结果记录方案名');
+assert(import50d.importResult.validationToggles.skipEmptySource === true, '导入结果记录校验开关');
+const samples50 = state50c.samples.filter(s => s.batchId === batch50.id);
+assert(samples50.length === 3, '数据库中3条样本');
+assert(samples50.some(s => s.sampleNo === 'S-50-01' && s.source === ''), '空来源样本成功导入');
+assert(samples50.some(s => s.sampleNo === 'S-50-03' && s.source === ''), '第3条空来源也成功导入');
 
 console.log('\n========== 测试结果 ==========\n');
 if (failures > 0) {

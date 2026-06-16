@@ -151,7 +151,16 @@ interface AppContextType {
   parseCSV: (content: string) => { sampleNo: string; quantity: string; source: string }[]
   parseCSVWithScheme: (content: string, columnMappings: ColumnMapping[]) => { sampleNo: string; quantity: string; source: string }[]
   prevalidateImportCSV: (batchId: string, csvRows: { sampleNo: string; quantity: string; source: string }[], validationToggles?: ValidationToggles) => PrevalidateSummary
-  batchImportSamples: (batchId: string, validatedRows: PrevalidateResult[]) => {
+  batchImportSamples: (
+    batchId: string,
+    validatedRows: PrevalidateResult[],
+    opts?: {
+      schemeId?: string
+      schemeName?: string
+      validationToggles?: ValidationToggles
+      columnMappings?: ColumnMapping[]
+    }
+  ) => {
     success: boolean
     error?: string
     importResult?: ImportResult
@@ -680,7 +689,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const batchImportSamples = (
     batchId: string,
-    validatedRows: PrevalidateResult[]
+    validatedRows: PrevalidateResult[],
+    opts?: {
+      schemeId?: string
+      schemeName?: string
+      validationToggles?: ValidationToggles
+      columnMappings?: ColumnMapping[]
+    }
   ): {
     success: boolean
     error?: string
@@ -703,6 +718,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
       successCount: 0,
       failedCount: 0,
       details: [],
+      schemeId: opts?.schemeId,
+      schemeName: opts?.schemeName,
+      validationToggles: opts?.validationToggles,
+      columnMappings: opts?.columnMappings,
     }
 
     for (const row of invalidRows) {

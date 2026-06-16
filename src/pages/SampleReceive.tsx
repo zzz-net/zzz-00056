@@ -23,6 +23,12 @@ function SampleReceive() {
   const [schemeChangeNotice, setSchemeChangeNotice] = useState<{ type: string; message: string } | null>(null)
   const lastProcessedChangeRef = useRef<string | null>(null)
 
+  const [importModalBatchNo, setImportModalBatchNo] = useState('')
+  const [importModalBatchName, setImportModalBatchName] = useState('')
+  const [showQuickBatchModal, setShowQuickBatchModal] = useState(false)
+  const [pendingCSVContent, setPendingCSVContent] = useState<string | null>(null)
+  const [pendingFileName, setPendingFileName] = useState<string | null>(null)
+
   useEffect(() => {
     if (!state.lastSchemeChange) {
       return
@@ -164,22 +170,21 @@ function SampleReceive() {
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
-    if (!file || !selectedBatchId) return
+    if (!file) return
 
     const reader = new FileReader()
     reader.onload = (event) => {
       const content = event.target?.result as string
-      const scheme = state.importSchemes.find((s) => s.id === selectedSchemeId)
-      let rows: { sampleNo: string; quantity: string; source: string }[]
-      if (scheme) {
-        rows = parseCSVWithScheme(content, scheme.columnMappings)
-      } else {
-        rows = parseCSV(content)
+      setPendingCSVContent(content)
+      setPendingFileName(file.name)
+
+      if (!selectedBatchId) {
+        setPrevalidateResult(null)
+        setImportedResult(null)
+        return
       }
-      const toggles: ValidationToggles | undefined = scheme ? scheme.validationToggles : undefined
-      const result = prevalidateImportCSV(selectedBatchId, rows, toggles)
-      setPrevalidateResult(result)
-      setImportedResult(null)
+
+      runPrevalidation(content, selectedBatchId, selectedSchemeId)
     }
     reader.readAsText(file)
   }
@@ -187,7 +192,13 @@ function SampleReceive() {
   const handleConfirmImport = () => {
     if (!prevalidateResult || !selectedBatchId) return
 
-    const result = batchImportSamples(selectedBatchId, prevalidateResult.results)
+    const scheme = state.importSchemes.find((s) => s.id === selectedSchemeId)
+    const result = batchImportSamples(selectedBatchId, prevalidateResult.results, {
+      schemeId: selectedSchemeId || undefined,
+      schemeName: scheme?.name,
+      validationToggles: scheme?.validationToggles,
+      columnMappings: scheme?.columnMappings,
+    })
     if (result.success && result.importResult) {
       setImportedResult({
         successCount: result.importResult.successCount,
@@ -210,10 +221,6 @@ function SampleReceive() {
   }
 
   const handleOpenImportModal = () => {
-    if (!selectedBatchId) {
-      setErrorMsg('请先选择批次')
-      return
-    }
     const lastId = state.lastSelectedSchemeId
     const lastChange = state.lastSchemeChange
 
@@ -292,7 +299,57 @@ function SampleReceive() {
 
     setPrevalidateResult(null)
     setImportedResult(null)
+    setPendingCSVContent(null)
+    setPendingFileName(null)
     setShowImportModal(true)
+  }
+
+  const runPrevalidation = (csvContent: string, batchId: string, schemeId: string) => {
+    const scheme = state.importSchemes.find((s) => s.id === schemeId)
+    let rows: { sampleNo: string; quantity: string; source: string }[]
+    if (scheme) {
+      rows = parseCSVWithScheme(csvContent, scheme.columnMappings)
+    } else {
+      rows = parseCSV(csvContent)
+    }
+    const toggles: ValidationToggles | undefined = scheme ? scheme.validationToggles : undefined
+    const result = prevalidateImportCSV(batchId, rows, toggles)
+    setPrevalidateResult(result)
+    setImportedResult(null)
+  }
+
+  const handleQuickCreateBatch = () => {
+    const scheme = state.importSchemes.find((s) => s.id === selectedSchemeId)
+    if (scheme && scheme.defaultBatch.batchNoPattern) {
+      const resolvedBatchNo = resolveDefaultBatch(scheme.defaultBatch.batchNoPattern)
+      const resolvedBatchName = resolveDefaultBatch(scheme.defaultBatch.batchNamePattern)
+      setImportModalBatchNo(resolvedBatchNo)
+      setImportModalBatchName(resolvedBatchName)
+    }
+    setShowQuickBatchModal(true)
+  }
+
+  const handleConfirmQuickCreateBatch = () => {
+    if (!importModalBatchNo.trim()) {
+      setErrorMsg('请输入批次编号')
+      return
+    }
+    const exists = state.batches.some((b) => b.batchNo === importModalBatchNo.trim())
+    if (exists) {
+      setErrorMsg('批次编号已存在')
+      return
+    }
+    const batch = createBatch(importModalBatchNo.trim(), importModalBatchName.trim())
+    setSelectedBatchId(batch.id)
+    setShowQuickBatchModal(false)
+    setImportModalBatchNo('')
+    setImportModalBatchName('')
+    setErrorMsg('')
+    setSuccessMsg(`已创建批次：${batch.batchNo}`)
+
+    if (pendingCSVContent) {
+      runPrevalidation(pendingCSVContent, batch.id, selectedSchemeId)
+    }
   }
 
   const handleCloseImportModal = () => {
@@ -301,6 +358,8 @@ function SampleReceive() {
     setImportedResult(null)
     setSchemeChangeNotice(null)
     clearLastSchemeChange()
+    setPendingCSVContent(null)
+    setPendingFileName(null)
     if (selectedSchemeId) {
       const exists = state.importSchemes.find((s) => s.id === selectedSchemeId)
       if (exists) {
@@ -322,9 +381,9 @@ function SampleReceive() {
     clearLastSchemeChange()
     if (prevalidateResult) {
       setPrevalidateResult(null)
-      if (fileInputRef.current) {
-        fileInputRef.current.value = ''
-      }
+    }
+    if (pendingCSVContent && selectedBatchId) {
+      runPrevalidation(pendingCSVContent, selectedBatchId, newSchemeId)
     }
   }
 
@@ -535,6 +594,59 @@ function SampleReceive() {
         </div>
       )}
 
+      {showQuickBatchModal && (
+        <div className="modal-overlay" onClick={() => setShowQuickBatchModal(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <div className="modal-title">创建接收批次</div>
+              <div className="modal-close" onClick={() => setShowQuickBatchModal(false)}>×</div>
+            </div>
+            <div className="modal-body">
+              {errorMsg && <div className="alert alert-error">{errorMsg}</div>}
+              <div className="form-group">
+                <label className="form-label">批次编号 *</label>
+                <input
+                  type="text"
+                  className="form-input"
+                  value={importModalBatchNo}
+                  onChange={(e) => setImportModalBatchNo(e.target.value)}
+                  placeholder="例如：BATCH-20240616-001"
+                  autoFocus
+                />
+              </div>
+              <div className="form-group">
+                <label className="form-label">批次名称</label>
+                <input
+                  type="text"
+                  className="form-input"
+                  value={importModalBatchName}
+                  onChange={(e) => setImportModalBatchName(e.target.value)}
+                  placeholder="例如：6月16日第一批送检"
+                />
+              </div>
+              {pendingFileName && (
+                <div style={{ padding: '10px', background: '#f0f7ff', borderRadius: 4, fontSize: 13 }}>
+                  ✓ 创建后将自动对已选文件「{pendingFileName}」进行预检
+                </div>
+              )}
+            </div>
+            <div className="modal-footer">
+              <button className="btn btn-default" onClick={() => {
+                setShowQuickBatchModal(false)
+                setErrorMsg('')
+                setImportModalBatchNo('')
+                setImportModalBatchName('')
+              }}>
+                取消
+              </button>
+              <button className="btn btn-primary" onClick={handleConfirmQuickCreateBatch}>
+                创建并继续导入
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showImportModal && (
         <div className="modal-overlay" onClick={handleCloseImportModal}>
           <div className="modal" onClick={(e) => e.stopPropagation()} style={{ width: 700, maxWidth: '90vw' }}>
@@ -575,6 +687,51 @@ function SampleReceive() {
                       </button>
                     </div>
                   )}
+
+                  {!selectedBatchId && (
+                    <div style={{
+                      padding: '12px 14px',
+                      background: '#fff7e6',
+                      border: '1px solid #ffd591',
+                      borderRadius: 4,
+                      marginBottom: 16,
+                      fontSize: 13,
+                    }}>
+                      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 10 }}>
+                        <span>⚠️</span>
+                        <span style={{ flex: 1 }}><strong>尚未选择接收批次</strong>，请先选择或创建批次后再导入。</span>
+                      </div>
+                      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                        {selectedScheme && selectedScheme.defaultBatch.batchNoPattern && (
+                          <button className="btn btn-primary btn-sm" onClick={handleQuickCreateBatch}>
+                            📋 按方案创建批次
+                          </button>
+                        )}
+                        <button className="btn btn-default btn-sm" onClick={handleQuickCreateBatch}>
+                          + 手动创建批次
+                        </button>
+                      </div>
+                      {pendingFileName && (
+                        <div style={{ marginTop: 10, fontSize: 12, color: '#666' }}>
+                          ✓ 已选择文件：{pendingFileName}（创建批次后将自动预检）
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {selectedBatchId && (
+                    <div style={{
+                      padding: '10px 14px',
+                      background: '#f6ffed',
+                      border: '1px solid #b7eb8f',
+                      borderRadius: 4,
+                      marginBottom: 12,
+                      fontSize: 13,
+                    }}>
+                      <span>✓ 已选择批次：<strong>{state.batches.find(b => b.id === selectedBatchId)?.batchNo}</strong></span>
+                    </div>
+                  )}
+
                   {state.importSchemes.length > 0 && (
                     <div className="form-group">
                       <label className="form-label">套用导入方案</label>
@@ -597,9 +754,9 @@ function SampleReceive() {
                       <div><strong>方案：</strong>{selectedScheme.name}</div>
                       <div><strong>列映射：</strong>{selectedScheme.columnMappings.map((m) => `${m.csvColumn}→${m.targetField}`).join('、')}</div>
                       <div><strong>批次号模式：</strong>{selectedScheme.defaultBatch.batchNoPattern || '未设置'}</div>
-                      <div><strong>校验开关：</strong>{
+                      <div><strong>已启用校验：</strong>{
                         Object.entries(selectedScheme.validationToggles)
-                          .filter(([, v]) => v)
+                          .filter(([, v]) => !v)
                           .map(([k]) => {
                             const labels: Record<string, string> = {
                               skipEmptySampleNo: '空编号',
@@ -612,9 +769,9 @@ function SampleReceive() {
                           })
                           .join('、') || '无'
                       }</div>
-                      <div><strong>已关闭校验：</strong>{
+                      <div><strong>已关闭校验（跳过）：</strong>{
                         Object.entries(selectedScheme.validationToggles)
-                          .filter(([, v]) => !v)
+                          .filter(([, v]) => v)
                           .map(([k]) => {
                             const labels: Record<string, string> = {
                               skipEmptySampleNo: '空编号',

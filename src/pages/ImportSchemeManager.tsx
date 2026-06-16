@@ -38,6 +38,11 @@ function ImportSchemeManager() {
     overwrittenCount: number
     error?: string
   } | null>(null)
+  const [detectedConflicts, setDetectedConflicts] = useState<{
+    schemeName: string
+    existingName: string
+    canOverwrite: boolean
+  }[]>([])
   const [expandedAuditId, setExpandedAuditId] = useState<string | null>(null)
   const [errorMsg, setErrorMsg] = useState('')
   const [successMsg, setSuccessMsg] = useState('')
@@ -142,6 +147,34 @@ function ImportSchemeManager() {
     setSuccessMsg(`已导出 ${schemes.length} 个方案`)
   }
 
+  const detectConflicts = (jsonText: string) => {
+    if (!jsonText.trim()) {
+      setDetectedConflicts([])
+      return
+    }
+    try {
+      const data = JSON.parse(jsonText)
+      if (!data.schemes || !Array.isArray(data.schemes)) {
+        setDetectedConflicts([])
+        return
+      }
+      const conflicts: { schemeName: string; existingName: string; canOverwrite: boolean }[] = []
+      for (const scheme of data.schemes) {
+        const existing = state.importSchemes.find((s) => s.name === scheme.name)
+        if (existing) {
+          conflicts.push({
+            schemeName: scheme.name,
+            existingName: existing.name,
+            canOverwrite: canModifyScheme(existing),
+          })
+        }
+      }
+      setDetectedConflicts(conflicts)
+    } catch {
+      setDetectedConflicts([])
+    }
+  }
+
   const handleImportFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file) return
@@ -149,6 +182,7 @@ function ImportSchemeManager() {
     reader.onload = (event) => {
       const content = event.target?.result as string
       setImportJSONText(content)
+      detectConflicts(content)
     }
     reader.readAsText(file)
   }
@@ -163,6 +197,7 @@ function ImportSchemeManager() {
     if (result.success) {
       setSuccessMsg(`导入完成：新增 ${result.importedCount}，覆盖 ${result.overwrittenCount}，跳过 ${result.skippedCount}`)
       setImportJSONText('')
+      setDetectedConflicts([])
     } else {
       setErrorMsg(result.error || '导入失败')
     }
@@ -173,6 +208,7 @@ function ImportSchemeManager() {
     setImportJSONText('')
     setImportResult(null)
     setConflictResolution('skip')
+    setDetectedConflicts([])
     if (importFileRef.current) {
       importFileRef.current.value = ''
     }
@@ -416,11 +452,46 @@ function ImportSchemeManager() {
                     <textarea
                       className="form-textarea"
                       value={importJSONText}
-                      onChange={(e) => setImportJSONText(e.target.value)}
+                      onChange={(e) => {
+                        setImportJSONText(e.target.value)
+                        detectConflicts(e.target.value)
+                      }}
                       rows={6}
                       placeholder='{"version":1,"schemes":[...]}'
                     />
                   </div>
+
+                  {detectedConflicts.length > 0 && (
+                    <div style={{
+                      padding: '12px 14px',
+                      background: '#fff7e6',
+                      border: '1px solid #ffd591',
+                      borderRadius: 4,
+                      marginBottom: 16,
+                    }}>
+                      <div style={{ fontWeight: 600, marginBottom: 8, color: '#d46b08' }}>
+                        ⚠️ 检测到 {detectedConflicts.length} 个同名冲突
+                      </div>
+                      <div style={{ fontSize: 13, maxHeight: 150, overflowY: 'auto' }}>
+                        {detectedConflicts.map((c, idx) => (
+                          <div key={idx} style={{ padding: '4px 0', display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <span>• 「{c.schemeName}」</span>
+                            {c.canOverwrite ? (
+                              <span className="status-tag" style={{ background: '#faad14', fontSize: 11 }}>可覆盖</span>
+                            ) : (
+                              <span className="status-tag" style={{ background: '#999', fontSize: 11 }}>只读（无法覆盖）</span>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                      {detectedConflicts.some(c => !c.canOverwrite) && (
+                        <div style={{ fontSize: 12, color: '#999', marginTop: 8 }}>
+                          标记为「只读」的方案为他人锁定共享，无论选择何种处理方式都将被跳过
+                        </div>
+                      )}
+                    </div>
+                  )}
+
                   <div className="form-group">
                     <label className="form-label">同名冲突处理</label>
                     <div style={{ display: 'flex', gap: 16, marginTop: 8 }}>
@@ -566,15 +637,15 @@ function ImportSchemeManager() {
                 </div>
               </div>
 
-              <h4 style={{ marginBottom: 12 }}>校验开关</h4>
+              <h4 style={{ marginBottom: 12 }}>校验开关（勾选=启用校验，不勾选=跳过校验）</h4>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 16 }}>
                 <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: 14 }}>
                   <input
                     type="checkbox"
-                    checked={editingScheme.validationToggles.skipEmptySampleNo}
+                    checked={!editingScheme.validationToggles.skipEmptySampleNo}
                     onChange={(e) => setEditingScheme({
                       ...editingScheme,
-                      validationToggles: { ...editingScheme.validationToggles, skipEmptySampleNo: e.target.checked },
+                      validationToggles: { ...editingScheme.validationToggles, skipEmptySampleNo: !e.target.checked },
                     })}
                   />
                   校验空样本编号
@@ -582,10 +653,10 @@ function ImportSchemeManager() {
                 <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: 14 }}>
                   <input
                     type="checkbox"
-                    checked={editingScheme.validationToggles.skipDuplicateInFile}
+                    checked={!editingScheme.validationToggles.skipDuplicateInFile}
                     onChange={(e) => setEditingScheme({
                       ...editingScheme,
-                      validationToggles: { ...editingScheme.validationToggles, skipDuplicateInFile: e.target.checked },
+                      validationToggles: { ...editingScheme.validationToggles, skipDuplicateInFile: !e.target.checked },
                     })}
                   />
                   校验CSV内重复编号
@@ -593,10 +664,10 @@ function ImportSchemeManager() {
                 <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: 14 }}>
                   <input
                     type="checkbox"
-                    checked={editingScheme.validationToggles.skipDuplicateInBatch}
+                    checked={!editingScheme.validationToggles.skipDuplicateInBatch}
                     onChange={(e) => setEditingScheme({
                       ...editingScheme,
-                      validationToggles: { ...editingScheme.validationToggles, skipDuplicateInBatch: e.target.checked },
+                      validationToggles: { ...editingScheme.validationToggles, skipDuplicateInBatch: !e.target.checked },
                     })}
                   />
                   校验批次内已存在编号
@@ -604,10 +675,10 @@ function ImportSchemeManager() {
                 <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: 14 }}>
                   <input
                     type="checkbox"
-                    checked={editingScheme.validationToggles.skipInvalidQuantity}
+                    checked={!editingScheme.validationToggles.skipInvalidQuantity}
                     onChange={(e) => setEditingScheme({
                       ...editingScheme,
-                      validationToggles: { ...editingScheme.validationToggles, skipInvalidQuantity: e.target.checked },
+                      validationToggles: { ...editingScheme.validationToggles, skipInvalidQuantity: !e.target.checked },
                     })}
                   />
                   校验无效数量
@@ -615,10 +686,10 @@ function ImportSchemeManager() {
                 <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: 14 }}>
                   <input
                     type="checkbox"
-                    checked={editingScheme.validationToggles.skipEmptySource}
+                    checked={!editingScheme.validationToggles.skipEmptySource}
                     onChange={(e) => setEditingScheme({
                       ...editingScheme,
-                      validationToggles: { ...editingScheme.validationToggles, skipEmptySource: e.target.checked },
+                      validationToggles: { ...editingScheme.validationToggles, skipEmptySource: !e.target.checked },
                     })}
                   />
                   校验空来源
@@ -737,8 +808,24 @@ function SchemeCard({
             更新于：{new Date(scheme.updatedAt).toLocaleString('zh-CN')}
           </span>
         </div>
-        <div style={{ fontSize: 12, color: '#999', marginLeft: 22, marginTop: 4 }}>
-          校验开关：
+        <div style={{ fontSize: 12, color: '#666', marginLeft: 22, marginTop: 4 }}>
+          已启用校验：
+          {Object.entries(scheme.validationToggles)
+            .filter(([, v]) => !v)
+            .map(([k]) => {
+              const labels: Record<string, string> = {
+                skipEmptySampleNo: '空编号',
+                skipDuplicateInFile: 'CSV重复',
+                skipDuplicateInBatch: '批次重复',
+                skipInvalidQuantity: '无效数量',
+                skipEmptySource: '空来源',
+              }
+              return labels[k] || k
+            })
+            .join('、') || '无'}
+        </div>
+        <div style={{ fontSize: 12, color: '#999', marginLeft: 22, marginTop: 2 }}>
+          已关闭校验（跳过）：
           {Object.entries(scheme.validationToggles)
             .filter(([, v]) => v)
             .map(([k]) => {
