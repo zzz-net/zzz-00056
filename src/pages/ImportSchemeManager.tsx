@@ -1,6 +1,15 @@
 import { useState, useRef } from 'react'
 import { useApp } from '../store/AppContext'
-import { ImportScheme, ConflictResolution } from '../types'
+import {
+  ImportScheme,
+  ConflictResolution,
+  SchemeMergePreview,
+  SchemeMergeFieldDiff,
+  SchemeMergeConflictItem,
+  MergeFieldResolution,
+  SchemeMergeableFieldName,
+  SchemeMergeLogEntry,
+} from '../types'
 
 function ImportSchemeManager() {
   const {
@@ -19,6 +28,10 @@ function ImportSchemeManager() {
     getSchemeAuditLog,
     doExportJSON,
     getCurrentUser,
+    previewSchemeMerge,
+    mergeImportSchemes,
+    undoLastSchemeMerge,
+    canUndoLastSchemeMerge,
   } = useApp()
 
   const [showCreateModal, setShowCreateModal] = useState(false)
@@ -29,7 +42,6 @@ function ImportSchemeManager() {
   const [copyingScheme, setCopyingScheme] = useState<ImportScheme | null>(null)
   const [copyValue, setCopyValue] = useState('')
   const [showImportModal, setShowImportModal] = useState(false)
-  const [conflictResolution, setConflictResolution] = useState<ConflictResolution>('skip')
   const [importJSONText, setImportJSONText] = useState('')
   const [importResult, setImportResult] = useState<{
     success: boolean
@@ -38,15 +50,24 @@ function ImportSchemeManager() {
     overwrittenCount: number
     error?: string
   } | null>(null)
-  const [detectedConflicts, setDetectedConflicts] = useState<{
-    schemeName: string
-    existingName: string
-    canOverwrite: boolean
-  }[]>([])
   const [expandedAuditId, setExpandedAuditId] = useState<string | null>(null)
   const [errorMsg, setErrorMsg] = useState('')
   const [successMsg, setSuccessMsg] = useState('')
   const importFileRef = useRef<HTMLInputElement>(null)
+
+  const [mergePreview, setMergePreview] = useState<SchemeMergePreview | null>(null)
+  const [fieldResolutions, setFieldResolutions] = useState<Record<string, Record<SchemeMergeableFieldName, MergeFieldResolution>>>({})
+  const [mergeStep, setMergeStep] = useState<'select' | 'preview' | 'result'>('select')
+  const [mergeResult, setMergeResult] = useState<{
+    success: boolean
+    mergedCount: number
+    newCount: number
+    blockedCount: number
+    mergeId: string
+    error?: string
+  } | null>(null)
+  const [expandedConflictId, setExpandedConflictId] = useState<string | null>(null)
+  const [expandedMergeLogId, setExpandedMergeLogId] = useState<string | null>(null)
 
   const currentUser = getCurrentUser()
 
@@ -147,34 +168,6 @@ function ImportSchemeManager() {
     setSuccessMsg(`已导出 ${schemes.length} 个方案`)
   }
 
-  const detectConflicts = (jsonText: string) => {
-    if (!jsonText.trim()) {
-      setDetectedConflicts([])
-      return
-    }
-    try {
-      const data = JSON.parse(jsonText)
-      if (!data.schemes || !Array.isArray(data.schemes)) {
-        setDetectedConflicts([])
-        return
-      }
-      const conflicts: { schemeName: string; existingName: string; canOverwrite: boolean }[] = []
-      for (const scheme of data.schemes) {
-        const existing = state.importSchemes.find((s) => s.name === scheme.name)
-        if (existing) {
-          conflicts.push({
-            schemeName: scheme.name,
-            existingName: existing.name,
-            canOverwrite: canModifyScheme(existing),
-          })
-        }
-      }
-      setDetectedConflicts(conflicts)
-    } catch {
-      setDetectedConflicts([])
-    }
-  }
-
   const handleImportFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file) return
@@ -182,24 +175,82 @@ function ImportSchemeManager() {
     reader.onload = (event) => {
       const content = event.target?.result as string
       setImportJSONText(content)
-      detectConflicts(content)
     }
     reader.readAsText(file)
   }
 
-  const handleImportConfirm = () => {
+  const handlePreviewMerge = () => {
     if (!importJSONText.trim()) {
       setErrorMsg('请输入或选择 JSON 文件')
       return
     }
-    const result = importSchemesJSON(importJSONText, conflictResolution)
-    setImportResult(result)
+    const preview = previewSchemeMerge(importJSONText)
+    if (preview.totalIncoming === 0) {
+      setErrorMsg('未检测到有效方案数据，请检查 JSON 格式')
+      return
+    }
+    setMergePreview(preview)
+    const initialResolutions: Record<string, Record<SchemeMergeableFieldName, MergeFieldResolution>> = {}
+    for (const item of preview.conflictItems) {
+      if (!item.canMerge) continue
+      const schemeResolutions: Record<SchemeMergeableFieldName, MergeFieldResolution> = {} as Record<SchemeMergeableFieldName, MergeFieldResolution>
+      for (const diff of item.fieldDiffs) {
+        schemeResolutions[diff.fieldName] = diff.isSame ? 'keep_original' : 'conflict'
+      }
+      initialResolutions[item.existingScheme.id] = schemeResolutions
+    }
+    setFieldResolutions(initialResolutions)
+    setMergeStep('preview')
+    setErrorMsg('')
+  }
+
+  const handleFieldResolutionChange = (
+    schemeId: string,
+    fieldName: SchemeMergeableFieldName,
+    resolution: MergeFieldResolution
+  ) => {
+    setFieldResolutions((prev) => ({
+      ...prev,
+      [schemeId]: {
+        ...prev[schemeId],
+        [fieldName]: resolution,
+      },
+    }))
+  }
+
+  const hasUnresolvedConflicts = () => {
+    if (!mergePreview) return true
+    for (const item of mergePreview.conflictItems) {
+      if (!item.canMerge) continue
+      const resolutions = fieldResolutions[item.existingScheme.id]
+      if (!resolutions) return true
+      for (const diff of item.fieldDiffs) {
+        if (!diff.isSame && (!resolutions[diff.fieldName] || resolutions[diff.fieldName] === 'conflict')) {
+          return true
+        }
+      }
+    }
+    return false
+  }
+
+  const handleMergeConfirm = () => {
+    if (!mergePreview) return
+    const result = mergeImportSchemes(mergePreview, fieldResolutions)
+    setMergeResult(result)
     if (result.success) {
-      setSuccessMsg(`导入完成：新增 ${result.importedCount}，覆盖 ${result.overwrittenCount}，跳过 ${result.skippedCount}`)
-      setImportJSONText('')
-      setDetectedConflicts([])
+      setMergeStep('result')
+      setSuccessMsg(`合并导入完成：新增 ${result.newCount}，合并 ${result.mergedCount}，阻止 ${result.blockedCount}`)
     } else {
-      setErrorMsg(result.error || '导入失败')
+      setErrorMsg(result.error || '合并导入失败')
+    }
+  }
+
+  const handleUndoMerge = () => {
+    const result = undoLastSchemeMerge()
+    if (result.success) {
+      setSuccessMsg('已撤销最近一次合并操作')
+    } else {
+      setErrorMsg(result.error || '撤销失败')
     }
   }
 
@@ -207,8 +258,11 @@ function ImportSchemeManager() {
     setShowImportModal(false)
     setImportJSONText('')
     setImportResult(null)
-    setConflictResolution('skip')
-    setDetectedConflicts([])
+    setMergePreview(null)
+    setFieldResolutions({})
+    setMergeStep('select')
+    setMergeResult(null)
+    setExpandedConflictId(null)
     if (importFileRef.current) {
       importFileRef.current.value = ''
     }
@@ -234,9 +288,29 @@ function ImportSchemeManager() {
     export: '导出',
     lock: '锁定',
     unlock: '解锁',
+    merge: '合并',
+    merge_undo: '撤销合并',
+  }
+
+  const MERGE_LOG_ACTION_LABELS: Record<string, string> = {
+    merge: '合并',
+    merge_new: '新增',
+    merge_blocked: '阻止',
+    merge_undo: '撤销',
+  }
+
+  const MERGE_LOG_ACTION_COLORS: Record<string, string> = {
+    merge: '#1890ff',
+    merge_new: '#52c41a',
+    merge_blocked: '#999',
+    merge_undo: '#fa8c16',
   }
 
   const allAuditLogs = [...state.schemeAuditLog].sort(
+    (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+  )
+
+  const allMergeLogs = [...state.schemeMergeLogs].sort(
     (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
   )
 
@@ -245,6 +319,11 @@ function ImportSchemeManager() {
       <div className="page-header">
         <h1 className="page-title">导入方案管理</h1>
         <div style={{ display: 'flex', gap: 8 }}>
+          {canUndoLastSchemeMerge() && (
+            <button className="btn btn-default" onClick={handleUndoMerge}>
+              ↩️ 撤销最近合并
+            </button>
+          )}
           <button className="btn btn-default" onClick={() => setShowImportModal(true)}>
             📥 导入方案
           </button>
@@ -329,13 +408,83 @@ function ImportSchemeManager() {
                         background: log.action === 'delete' ? '#f5222d' :
                           log.action === 'create' ? '#52c41a' :
                           log.action === 'import' ? '#1890ff' :
-                          log.action === 'export' ? '#722ed1' : '#faad14'
+                          log.action === 'export' ? '#722ed1' :
+                          log.action === 'merge' ? '#1890ff' :
+                          log.action === 'merge_undo' ? '#fa8c16' : '#faad14'
                       }}>
                         {AUDIT_ACTION_LABELS[log.action] || log.action}
                       </span>
                     </td>
                     <td>{log.operatorName}</td>
                     <td style={{ fontSize: 12, color: '#666' }}>{log.detail || '-'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {allMergeLogs.length > 0 && (
+        <div className="card">
+          <h3 style={{ marginBottom: 16 }}>合并日志</h3>
+          <div style={{ maxHeight: 400, overflowY: 'auto' }}>
+            <table className="table">
+              <thead style={{ position: 'sticky', top: 0, background: '#fafafa' }}>
+                <tr>
+                  <th>时间</th>
+                  <th>方案名称</th>
+                  <th>操作</th>
+                  <th>操作人</th>
+                  <th>字段来源/详情</th>
+                </tr>
+              </thead>
+              <tbody>
+                {allMergeLogs.map((log) => (
+                  <tr key={log.id}>
+                    <td style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
+                      {new Date(log.timestamp).toLocaleString('zh-CN')}
+                    </td>
+                    <td>{log.schemeName}</td>
+                    <td>
+                      <span className="status-tag" style={{ background: MERGE_LOG_ACTION_COLORS[log.action] || '#999' }}>
+                        {MERGE_LOG_ACTION_LABELS[log.action] || log.action}
+                      </span>
+                    </td>
+                    <td>{log.operatorName}</td>
+                    <td style={{ fontSize: 12 }}>
+                      {log.blockReason && (
+                        <span style={{ color: '#f5222d' }}>{log.blockReason}</span>
+                      )}
+                      {log.detail && (
+                        <span style={{ color: '#666' }}>{log.detail}</span>
+                      )}
+                      {log.action === 'merge' && log.fieldSources.length > 0 && (
+                        <div>
+                          <span
+                            style={{ color: '#1890ff', cursor: 'pointer' }}
+                            onClick={() => setExpandedMergeLogId(expandedMergeLogId === log.id ? null : log.id)}
+                          >
+                            {expandedMergeLogId === log.id ? '▼ 收起字段来源' : '▶ 展开字段来源'}
+                          </span>
+                          {expandedMergeLogId === log.id && (
+                            <div style={{ marginTop: 4, paddingLeft: 12, borderLeft: '2px solid #e8e8e8' }}>
+                              {log.fieldSources.map((fs, idx) => (
+                                <div key={idx} style={{ padding: '2px 0', display: 'flex', gap: 8 }}>
+                                  <span style={{ color: '#333' }}>{fs.fieldLabel}</span>
+                                  <span className="status-tag" style={{
+                                    background: fs.source === 'new' ? '#1890ff' : '#52c41a',
+                                    fontSize: 11,
+                                  }}>
+                                    {fs.source === 'new' ? '新值' : '原值'}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -428,14 +577,23 @@ function ImportSchemeManager() {
 
       {showImportModal && (
         <div className="modal-overlay" onClick={handleCloseImportModal}>
-          <div className="modal" onClick={(e) => e.stopPropagation()} style={{ width: 600, maxWidth: '90vw' }}>
+          <div
+            className="modal"
+            onClick={(e) => e.stopPropagation()}
+            style={{ width: mergeStep === 'preview' ? 900 : 600, maxWidth: '95vw' }}
+          >
             <div className="modal-header">
-              <div className="modal-title">导入方案 JSON</div>
+              <div className="modal-title">
+                {mergeStep === 'select' && '导入方案 JSON'}
+                {mergeStep === 'preview' && '预览差异与冲突解决'}
+                {mergeStep === 'result' && '合并导入结果'}
+              </div>
               <div className="modal-close" onClick={handleCloseImportModal}>×</div>
             </div>
             <div className="modal-body">
               {errorMsg && <div className="alert alert-error">{errorMsg}</div>}
-              {!importResult ? (
+
+              {mergeStep === 'select' && (
                 <>
                   <div className="form-group">
                     <label className="form-label">选择 JSON 文件</label>
@@ -452,92 +610,240 @@ function ImportSchemeManager() {
                     <textarea
                       className="form-textarea"
                       value={importJSONText}
-                      onChange={(e) => {
-                        setImportJSONText(e.target.value)
-                        detectConflicts(e.target.value)
-                      }}
+                      onChange={(e) => setImportJSONText(e.target.value)}
                       rows={6}
                       placeholder='{"version":1,"schemes":[...]}'
                     />
                   </div>
+                </>
+              )}
 
-                  {detectedConflicts.length > 0 && (
-                    <div style={{
-                      padding: '12px 14px',
-                      background: '#fff7e6',
-                      border: '1px solid #ffd591',
-                      borderRadius: 4,
-                      marginBottom: 16,
-                    }}>
-                      <div style={{ fontWeight: 600, marginBottom: 8, color: '#d46b08' }}>
-                        ⚠️ 检测到 {detectedConflicts.length} 个同名冲突
-                      </div>
-                      <div style={{ fontSize: 13, maxHeight: 150, overflowY: 'auto' }}>
-                        {detectedConflicts.map((c, idx) => (
-                          <div key={idx} style={{ padding: '4px 0', display: 'flex', alignItems: 'center', gap: 8 }}>
-                            <span>• 「{c.schemeName}」</span>
-                            {c.canOverwrite ? (
-                              <span className="status-tag" style={{ background: '#faad14', fontSize: 11 }}>可覆盖</span>
-                            ) : (
-                              <span className="status-tag" style={{ background: '#999', fontSize: 11 }}>只读（无法覆盖）</span>
-                            )}
+              {mergeStep === 'preview' && mergePreview && (
+                <>
+                  <div style={{
+                    padding: '12px 14px',
+                    background: '#e6f7ff',
+                    border: '1px solid #91d5ff',
+                    borderRadius: 4,
+                    marginBottom: 16,
+                  }}>
+                    <div style={{ fontSize: 14, color: '#0050b3' }}>
+                      共 <strong>{mergePreview.totalIncoming}</strong> 个方案：
+                      新增 <strong style={{ color: '#52c41a' }}>{mergePreview.newCount}</strong> 个，
+                      冲突 <strong style={{ color: '#faad14' }}>{mergePreview.conflictCount}</strong> 个
+                      {mergePreview.blockedCount > 0 && (
+                        <>，阻止 <strong style={{ color: '#f5222d' }}>{mergePreview.blockedCount}</strong> 个</>
+                      )}
+                    </div>
+                  </div>
+
+                  {mergePreview.newSchemes.length > 0 && (
+                    <div style={{ marginBottom: 16 }}>
+                      <h4 style={{ marginBottom: 8, color: '#52c41a' }}>✅ 新增方案（{mergePreview.newSchemes.length}）</h4>
+                      <div style={{
+                        padding: '8px 12px',
+                        background: '#f6ffed',
+                        border: '1px solid #b7eb8f',
+                        borderRadius: 4,
+                      }}>
+                        {mergePreview.newSchemes.map((s, idx) => (
+                          <div key={idx} style={{ padding: '4px 0', fontSize: 13 }}>
+                            • {s.name}
                           </div>
                         ))}
                       </div>
-                      {detectedConflicts.some(c => !c.canOverwrite) && (
-                        <div style={{ fontSize: 12, color: '#999', marginTop: 8 }}>
-                          标记为「只读」的方案为他人锁定共享，无论选择何种处理方式都将被跳过
-                        </div>
-                      )}
                     </div>
                   )}
 
-                  <div className="form-group">
-                    <label className="form-label">同名冲突处理</label>
-                    <div style={{ display: 'flex', gap: 16, marginTop: 8 }}>
-                      <label style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
-                        <input
-                          type="radio"
-                          name="conflict"
-                          checked={conflictResolution === 'skip'}
-                          onChange={() => setConflictResolution('skip')}
-                        />
-                        跳过（保留现有方案）
-                      </label>
-                      <label style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
-                        <input
-                          type="radio"
-                          name="conflict"
-                          checked={conflictResolution === 'overwrite'}
-                          onChange={() => setConflictResolution('overwrite')}
-                        />
-                        覆盖（替换现有方案）
-                      </label>
+                  {mergePreview.conflictItems.filter((c) => c.canMerge).length > 0 && (
+                    <div style={{ marginBottom: 16 }}>
+                      <h4 style={{ marginBottom: 8, color: '#faad14' }}>
+                        ⚠️ 冲突方案（{mergePreview.conflictItems.filter((c) => c.canMerge).length}）
+                      </h4>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                        {mergePreview.conflictItems.filter((c) => c.canMerge).map((item) => {
+                          const schemeId = item.existingScheme.id
+                          const isExpanded = expandedConflictId === schemeId
+                          const resolutions = fieldResolutions[schemeId]
+                          const unresolvedCount = resolutions
+                            ? item.fieldDiffs.filter((d) => !d.isSame && (!resolutions[d.fieldName] || resolutions[d.fieldName] === 'conflict')).length
+                            : item.fieldDiffs.filter((d) => !d.isSame).length
+
+                          return (
+                            <div key={schemeId} style={{
+                              border: `1px solid ${unresolvedCount > 0 ? '#ffd591' : '#b7eb8f'}`,
+                              borderRadius: 4,
+                              overflow: 'hidden',
+                            }}>
+                              <div
+                                style={{
+                                  padding: '10px 14px',
+                                  background: unresolvedCount > 0 ? '#fff7e6' : '#f6ffed',
+                                  cursor: 'pointer',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'space-between',
+                                }}
+                                onClick={() => setExpandedConflictId(isExpanded ? null : schemeId)}
+                              >
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                  <span>{isExpanded ? '▼' : '▶'}</span>
+                                  <span style={{ fontWeight: 600 }}>{item.existingScheme.name}</span>
+                                  {unresolvedCount > 0 ? (
+                                    <span className="status-tag" style={{ background: '#f5222d' }}>
+                                      {unresolvedCount} 个未解决
+                                    </span>
+                                  ) : (
+                                    <span className="status-tag" style={{ background: '#52c41a' }}>
+                                      已全部解决
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+
+                              {isExpanded && (
+                                <div style={{ padding: '12px 14px', background: '#fff' }}>
+                                  <table className="table" style={{ margin: 0 }}>
+                                    <thead>
+                                      <tr>
+                                        <th style={{ width: '20%' }}>字段</th>
+                                        <th style={{ width: '25%' }}>原值</th>
+                                        <th style={{ width: '25%' }}>新值</th>
+                                        <th style={{ width: '30%' }}>解决方式</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {item.fieldDiffs.map((diff) => {
+                                        const currentResolution = resolutions?.[diff.fieldName] || 'conflict'
+                                        return (
+                                          <tr key={diff.fieldName}>
+                                            <td style={{ fontSize: 13 }}>
+                                              {diff.isSame && <span style={{ color: '#52c41a', marginRight: 4 }}>✓</span>}
+                                              {diff.fieldLabel}
+                                            </td>
+                                            <td style={{ fontSize: 12, color: '#333' }}>
+                                              {diff.originalDisplay || '-'}
+                                            </td>
+                                            <td style={{ fontSize: 12, color: '#333' }}>
+                                              {diff.newDisplay || '-'}
+                                            </td>
+                                            <td>
+                                              {diff.isSame ? (
+                                                <span style={{ fontSize: 12, color: '#52c41a' }}>相同（自动保留原值）</span>
+                                              ) : (
+                                                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                                                  <label style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer', fontSize: 12 }}>
+                                                    <input
+                                                      type="radio"
+                                                      name={`resolution-${schemeId}-${diff.fieldName}`}
+                                                      checked={currentResolution === 'keep_original'}
+                                                      onChange={() => handleFieldResolutionChange(schemeId, diff.fieldName, 'keep_original')}
+                                                    />
+                                                    保留原值
+                                                  </label>
+                                                  <label style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer', fontSize: 12 }}>
+                                                    <input
+                                                      type="radio"
+                                                      name={`resolution-${schemeId}-${diff.fieldName}`}
+                                                      checked={currentResolution === 'use_new'}
+                                                      onChange={() => handleFieldResolutionChange(schemeId, diff.fieldName, 'use_new')}
+                                                    />
+                                                    采用新值
+                                                  </label>
+                                                  <label style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer', fontSize: 12, color: '#f5222d' }}>
+                                                    <input
+                                                      type="radio"
+                                                      name={`resolution-${schemeId}-${diff.fieldName}`}
+                                                      checked={currentResolution === 'conflict'}
+                                                      onChange={() => handleFieldResolutionChange(schemeId, diff.fieldName, 'conflict')}
+                                                    />
+                                                    <span style={{ color: currentResolution === 'conflict' ? '#f5222d' : 'inherit' }}>待处理</span>
+                                                  </label>
+                                                </div>
+                                              )}
+                                            </td>
+                                          </tr>
+                                        )
+                                      })}
+                                    </tbody>
+                                  </table>
+                                </div>
+                              )}
+                            </div>
+                          )
+                        })}
+                      </div>
                     </div>
-                  </div>
+                  )}
+
+                  {mergePreview.blockedCount > 0 && (
+                    <div style={{ marginBottom: 16 }}>
+                      <h4 style={{ marginBottom: 8, color: '#f5222d' }}>
+                        🚫 阻止方案（{mergePreview.blockedCount}）
+                      </h4>
+                      <div style={{
+                        padding: '8px 12px',
+                        background: '#fff1f0',
+                        border: '1px solid #ffa39e',
+                        borderRadius: 4,
+                      }}>
+                        {mergePreview.conflictItems.filter((c) => !c.canMerge).map((item) => (
+                          <div key={item.existingScheme.id} style={{ padding: '6px 0', fontSize: 13, display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <span>• {item.existingScheme.name}</span>
+                            <span className="status-tag" style={{ background: '#f5222d', fontSize: 11 }}>
+                              {item.blockReason}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </>
-              ) : (
+              )}
+
+              {mergeStep === 'result' && mergeResult && (
                 <div style={{
                   padding: 16,
                   borderRadius: 4,
-                  background: '#f6ffed',
-                  border: '1px solid #b7eb8f',
+                  background: mergeResult.success ? '#f6ffed' : '#fff1f0',
+                  border: `1px solid ${mergeResult.success ? '#b7eb8f' : '#ffa39e'}`,
                 }}>
-                  <strong>✅ 导入完成</strong>
-                  <div style={{ marginTop: 8, fontSize: 14 }}>
-                    <div>新增：<strong>{importResult.importedCount}</strong> 个</div>
-                    <div>覆盖：<strong>{importResult.overwrittenCount}</strong> 个</div>
-                    <div>跳过：<strong>{importResult.skippedCount}</strong> 个</div>
-                  </div>
+                  {mergeResult.success ? (
+                    <>
+                      <strong>✅ 合并导入完成</strong>
+                      <div style={{ marginTop: 8, fontSize: 14 }}>
+                        <div>新增：<strong>{mergeResult.newCount}</strong> 个</div>
+                        <div>合并：<strong>{mergeResult.mergedCount}</strong> 个</div>
+                        <div>阻止：<strong>{mergeResult.blockedCount}</strong> 个</div>
+                      </div>
+                    </>
+                  ) : (
+                    <strong>❌ 合并导入失败：{mergeResult.error}</strong>
+                  )}
                 </div>
               )}
             </div>
             <div className="modal-footer">
-              <button className="btn btn-default" onClick={handleCloseImportModal}>
-                {importResult ? '完成' : '取消'}
-              </button>
-              {!importResult && (
-                <button className="btn btn-primary" onClick={handleImportConfirm}>确认导入</button>
+              {mergeStep === 'select' && (
+                <>
+                  <button className="btn btn-default" onClick={handleCloseImportModal}>取消</button>
+                  <button className="btn btn-primary" onClick={handlePreviewMerge}>预览差异</button>
+                </>
+              )}
+              {mergeStep === 'preview' && (
+                <>
+                  <button className="btn btn-default" onClick={() => { setMergeStep('select'); setMergePreview(null); setFieldResolutions({}); setErrorMsg('') }}>返回</button>
+                  <button
+                    className="btn btn-primary"
+                    onClick={handleMergeConfirm}
+                    disabled={hasUnresolvedConflicts()}
+                  >
+                    确认合并导入
+                  </button>
+                </>
+              )}
+              {mergeStep === 'result' && (
+                <button className="btn btn-default" onClick={handleCloseImportModal}>完成</button>
               )}
             </div>
           </div>

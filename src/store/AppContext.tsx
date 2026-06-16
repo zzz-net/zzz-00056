@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useReducer, useEffect, ReactNode, useState, useRef } from 'react'
-import { AppData, Sample, Batch, HistoryRecord, SampleStatus, User, ImportResult, BatchLedgerEntry, PrevalidateSummary, PrevalidateResult, ImportScheme, SchemeAuditLogEntry, SchemeAuditAction, ConflictResolution, ColumnMapping, ValidationToggles, DefaultBatchInfo, SchemeChangeEvent, SchemeChangeType, OperationLogEntry, OperationLogCategory, ImportTask, ImportTaskStatus, ImportTaskDraftState, TaskAuditLogEntry, TaskAuditAction, ImportRollbackSnapshot } from '../types'
+import { AppData, Sample, Batch, HistoryRecord, SampleStatus, User, ImportResult, BatchLedgerEntry, PrevalidateSummary, PrevalidateResult, ImportScheme, SchemeAuditLogEntry, SchemeAuditAction, ConflictResolution, ColumnMapping, ValidationToggles, DefaultBatchInfo, SchemeChangeEvent, SchemeChangeType, OperationLogEntry, OperationLogCategory, ImportTask, ImportTaskStatus, ImportTaskDraftState, TaskAuditLogEntry, TaskAuditAction, ImportRollbackSnapshot, SchemeMergePreview, SchemeMergeFieldDiff, SchemeMergeConflictItem, MergeFieldResolution, SchemeMergeableFieldName, SchemeMergeLogEntry, SchemeMergeSnapshot, SchemeMergeFieldSource } from '../types'
 import { v4 as uuidv4 } from 'uuid'
 
 const STORAGE_KEY = 'lab-sample-tracker-data'
@@ -34,6 +34,10 @@ type Action =
   | { type: 'REMOVE_SAMPLES_BATCH'; sampleIds: string[]; ledgerIds: string[] }
   | { type: 'SET_LAST_IMPORT_ID'; importId: string | null }
   | { type: 'UPDATE_IMPORT_RESULT'; payload: ImportResult }
+  | { type: 'ADD_SCHEME_MERGE_LOG'; payload: SchemeMergeLogEntry }
+  | { type: 'SET_LAST_SCHEME_MERGE_ID'; mergeId: string | null }
+  | { type: 'ADD_SCHEME_MERGE_SNAPSHOT'; payload: SchemeMergeSnapshot }
+  | { type: 'RESTORE_SCHEME_MERGE'; payload: { originalSchemes: ImportScheme[]; addedSchemeIds: string[] } }
 
 const defaultData: AppData = {
   users: [
@@ -55,6 +59,9 @@ const defaultData: AppData = {
   lastActiveTaskId: null,
   rollbackSnapshots: [],
   lastImportId: null,
+  schemeMergeLogs: [],
+  lastSchemeMergeId: null,
+  schemeMergeSnapshots: [],
 }
 
 const initialState: AppState = defaultData
@@ -177,6 +184,27 @@ function appReducer(state: AppState, action: Action): AppState {
           r.id === action.payload.id ? action.payload : r
         ),
       }
+    case 'ADD_SCHEME_MERGE_LOG':
+      return {
+        ...state,
+        schemeMergeLogs: [...state.schemeMergeLogs, action.payload],
+      }
+    case 'SET_LAST_SCHEME_MERGE_ID':
+      return { ...state, lastSchemeMergeId: action.mergeId }
+    case 'ADD_SCHEME_MERGE_SNAPSHOT':
+      return {
+        ...state,
+        schemeMergeSnapshots: [...state.schemeMergeSnapshots, action.payload],
+      }
+    case 'RESTORE_SCHEME_MERGE':
+      return {
+        ...state,
+        importSchemes: [
+          ...state.importSchemes.filter((s) => !action.payload.addedSchemeIds.includes(s.id)),
+          ...action.payload.originalSchemes,
+        ],
+        lastSchemeMergeId: null,
+      }
     default:
       return state
   }
@@ -276,6 +304,21 @@ interface AppContextType {
     columnMappings: ColumnMapping[]
     prevalidateSummary: PrevalidateSummary
   }
+  previewSchemeMerge: (jsonString: string) => SchemeMergePreview
+  mergeImportSchemes: (
+    preview: SchemeMergePreview,
+    conflictResolutions: Record<string, Record<SchemeMergeableFieldName, MergeFieldResolution>>
+  ) => {
+    success: boolean
+    error?: string
+    mergedCount: number
+    newCount: number
+    blockedCount: number
+    mergeId: string
+  }
+  undoLastSchemeMerge: () => { success: boolean; error?: string }
+  canUndoLastSchemeMerge: () => boolean
+  getSchemeMergeLog: (schemeId: string) => SchemeMergeLogEntry[]
 }
 
 const AppContext = createContext<AppContextType | null>(null)
@@ -318,6 +361,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
       lastActiveTaskId: data.lastActiveTaskId || null,
       rollbackSnapshots: data.rollbackSnapshots || [],
       lastImportId: data.lastImportId || null,
+      schemeMergeLogs: data.schemeMergeLogs || [],
+      lastSchemeMergeId: data.lastSchemeMergeId || null,
+      schemeMergeSnapshots: data.schemeMergeSnapshots || [],
       samples: (data.samples || []).map((s) => ({
         ...s,
         history: s.history || [],
@@ -1475,6 +1521,361 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return { parsedRows, validationToggles, columnMappings, prevalidateSummary }
   }
 
+  const FIELD_LABELS: Record<SchemeMergeableFieldName, string> = {
+    columnMappings: '列映射',
+    'defaultBatch.batchNoPattern': '默认批次号模式',
+    'defaultBatch.batchNamePattern': '默认批次名称模式',
+    'validationToggles.skipEmptySampleNo': '校验：空样本编号',
+    'validationToggles.skipDuplicateInFile': '校验：CSV内重复编号',
+    'validationToggles.skipDuplicateInBatch': '校验：批次内已存在编号',
+    'validationToggles.skipInvalidQuantity': '校验：无效数量',
+    'validationToggles.skipEmptySource': '校验：空来源',
+    isShared: '共享状态',
+    isLocked: '锁定状态',
+  }
+
+  const getFieldValue = (scheme: ImportScheme, fieldName: SchemeMergeableFieldName): unknown => {
+    switch (fieldName) {
+      case 'columnMappings': return scheme.columnMappings
+      case 'defaultBatch.batchNoPattern': return scheme.defaultBatch.batchNoPattern
+      case 'defaultBatch.batchNamePattern': return scheme.defaultBatch.batchNamePattern
+      case 'validationToggles.skipEmptySampleNo': return scheme.validationToggles.skipEmptySampleNo
+      case 'validationToggles.skipDuplicateInFile': return scheme.validationToggles.skipDuplicateInFile
+      case 'validationToggles.skipDuplicateInBatch': return scheme.validationToggles.skipDuplicateInBatch
+      case 'validationToggles.skipInvalidQuantity': return scheme.validationToggles.skipInvalidQuantity
+      case 'validationToggles.skipEmptySource': return scheme.validationToggles.skipEmptySource
+      case 'isShared': return scheme.isShared
+      case 'isLocked': return scheme.isLocked
+    }
+  }
+
+  const getDisplayValue = (fieldName: SchemeMergeableFieldName, value: unknown): string => {
+    if (fieldName === 'columnMappings') {
+      const mappings = value as ColumnMapping[]
+      if (!Array.isArray(mappings)) return ''
+      return mappings.map((m) => `${m.csvColumn}→${m.targetField}`).join('; ')
+    }
+    if (typeof value === 'boolean') return value ? '是' : '否'
+    if (typeof value === 'string') return value
+    return String(value ?? '')
+  }
+
+  const previewSchemeMerge = (jsonString: string): SchemeMergePreview => {
+    const emptyPreview: SchemeMergePreview = {
+      conflictItems: [],
+      newSchemes: [],
+      totalIncoming: 0,
+      conflictCount: 0,
+      newCount: 0,
+      blockedCount: 0,
+    }
+
+    let importData: { version: number; exportedAt: string; exportedBy: string; schemes: ImportScheme[] }
+    try {
+      importData = JSON.parse(jsonString)
+    } catch {
+      return emptyPreview
+    }
+    if (!importData.schemes || !Array.isArray(importData.schemes)) {
+      return emptyPreview
+    }
+
+    const conflictItems: SchemeMergeConflictItem[] = []
+    const newSchemes: ImportScheme[] = []
+    const allFieldNames: SchemeMergeableFieldName[] = [
+      'columnMappings',
+      'defaultBatch.batchNoPattern',
+      'defaultBatch.batchNamePattern',
+      'validationToggles.skipEmptySampleNo',
+      'validationToggles.skipDuplicateInFile',
+      'validationToggles.skipDuplicateInBatch',
+      'validationToggles.skipInvalidQuantity',
+      'validationToggles.skipEmptySource',
+      'isShared',
+      'isLocked',
+    ]
+
+    for (const incoming of importData.schemes) {
+      const existing = state.importSchemes.find((s) => s.name === incoming.name)
+      if (!existing) {
+        newSchemes.push(incoming)
+        continue
+      }
+
+      let canMerge = true
+      let blockReason: string | undefined
+
+      if (!canModifyScheme(existing)) {
+        canMerge = false
+        blockReason = '只读共享方案，无法合并'
+      }
+
+      if (canMerge) {
+        const hasRequiredFields = incoming.columnMappings && incoming.defaultBatch && incoming.validationToggles
+        if (!hasRequiredFields) {
+          canMerge = false
+          blockReason = '字段结构不兼容'
+        }
+      }
+
+      const fieldDiffs: SchemeMergeFieldDiff[] = allFieldNames.map((fieldName) => {
+        const originalValue = getFieldValue(existing, fieldName)
+        const newValue = getFieldValue(incoming, fieldName)
+        const isSame = JSON.stringify(originalValue) === JSON.stringify(newValue)
+        return {
+          fieldName,
+          fieldLabel: FIELD_LABELS[fieldName],
+          originalValue,
+          newValue,
+          originalDisplay: getDisplayValue(fieldName, originalValue),
+          newDisplay: getDisplayValue(fieldName, newValue),
+          isSame,
+          resolution: isSame ? 'keep_original' as MergeFieldResolution : 'conflict' as MergeFieldResolution,
+        }
+      })
+
+      const hasUnresolvedConflicts = canMerge && fieldDiffs.some((d) => !d.isSame && d.resolution === 'conflict')
+
+      conflictItems.push({
+        incomingScheme: incoming,
+        existingScheme: existing,
+        canMerge,
+        blockReason,
+        fieldDiffs,
+        hasUnresolvedConflicts,
+      })
+    }
+
+    const blockedCount = conflictItems.filter((c) => !c.canMerge).length
+
+    return {
+      conflictItems,
+      newSchemes,
+      totalIncoming: importData.schemes.length,
+      conflictCount: conflictItems.length,
+      newCount: newSchemes.length,
+      blockedCount,
+    }
+  }
+
+  const setFieldValue = (scheme: ImportScheme, fieldName: SchemeMergeableFieldName, value: unknown): ImportScheme => {
+    switch (fieldName) {
+      case 'columnMappings': return { ...scheme, columnMappings: value as ColumnMapping[] }
+      case 'defaultBatch.batchNoPattern': return { ...scheme, defaultBatch: { ...scheme.defaultBatch, batchNoPattern: value as string } }
+      case 'defaultBatch.batchNamePattern': return { ...scheme, defaultBatch: { ...scheme.defaultBatch, batchNamePattern: value as string } }
+      case 'validationToggles.skipEmptySampleNo': return { ...scheme, validationToggles: { ...scheme.validationToggles, skipEmptySampleNo: value as boolean } }
+      case 'validationToggles.skipDuplicateInFile': return { ...scheme, validationToggles: { ...scheme.validationToggles, skipDuplicateInFile: value as boolean } }
+      case 'validationToggles.skipDuplicateInBatch': return { ...scheme, validationToggles: { ...scheme.validationToggles, skipDuplicateInBatch: value as boolean } }
+      case 'validationToggles.skipInvalidQuantity': return { ...scheme, validationToggles: { ...scheme.validationToggles, skipInvalidQuantity: value as boolean } }
+      case 'validationToggles.skipEmptySource': return { ...scheme, validationToggles: { ...scheme.validationToggles, skipEmptySource: value as boolean } }
+      case 'isShared': return { ...scheme, isShared: value as boolean }
+      case 'isLocked': return { ...scheme, isLocked: value as boolean }
+    }
+  }
+
+  const mergeImportSchemes = (
+    preview: SchemeMergePreview,
+    conflictResolutions: Record<string, Record<SchemeMergeableFieldName, MergeFieldResolution>>
+  ): {
+    success: boolean
+    error?: string
+    mergedCount: number
+    newCount: number
+    blockedCount: number
+    mergeId: string
+  } => {
+    for (const item of preview.conflictItems) {
+      if (!item.canMerge) continue
+      const schemeResolutions = conflictResolutions[item.existingScheme.id]
+      if (!schemeResolutions) {
+        return { success: false, error: '存在未解决的冲突，无法确认导入', mergedCount: 0, newCount: 0, blockedCount: 0, mergeId: '' }
+      }
+      const hasUnresolved = item.fieldDiffs.some(
+        (d) => !d.isSame && (!schemeResolutions[d.fieldName] || schemeResolutions[d.fieldName] === 'conflict')
+      )
+      if (hasUnresolved) {
+        return { success: false, error: '存在未解决的冲突，无法确认导入', mergedCount: 0, newCount: 0, blockedCount: 0, mergeId: '' }
+      }
+    }
+
+    const mergeId = uuidv4()
+    const user = getCurrentUser()
+    let mergedCount = 0
+    let newCount = 0
+    const addedSchemeIds: string[] = []
+
+    dispatch({
+      type: 'ADD_SCHEME_MERGE_SNAPSHOT',
+      payload: {
+        mergeId,
+        originalSchemes: [...state.importSchemes],
+        addedSchemeIds: [],
+        operatorId: state.currentUserId || '',
+        operatorName: user?.username || '未知',
+        createdAt: new Date().toISOString(),
+      },
+    })
+
+    for (const newSchemeData of preview.newSchemes) {
+      const newScheme: ImportScheme = {
+        ...newSchemeData,
+        id: uuidv4(),
+        createdBy: user?.username || '未知',
+        createdById: state.currentUserId || '',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        isShared: false,
+        isLocked: false,
+      }
+      dispatch({ type: 'ADD_IMPORT_SCHEME', payload: newScheme })
+      addedSchemeIds.push(newScheme.id)
+      addSchemeAuditLog(newScheme.id, newScheme.name, 'merge', `合并导入新增方案「${newScheme.name}」`)
+      emitSchemeChange('import', newScheme.id, newScheme.name, { detail: `合并导入新增方案「${newScheme.name}」` })
+      dispatch({
+        type: 'ADD_SCHEME_MERGE_LOG',
+        payload: {
+          id: uuidv4(),
+          mergeId,
+          schemeId: newScheme.id,
+          schemeName: newScheme.name,
+          action: 'merge_new',
+          operatorId: state.currentUserId || '',
+          operatorName: user?.username || '未知',
+          timestamp: new Date().toISOString(),
+          fieldSources: [],
+        },
+      })
+      newCount++
+    }
+
+    for (const item of preview.conflictItems) {
+      if (!item.canMerge) {
+        dispatch({
+          type: 'ADD_SCHEME_MERGE_LOG',
+          payload: {
+            id: uuidv4(),
+            mergeId,
+            schemeId: item.existingScheme.id,
+            schemeName: item.existingScheme.name,
+            action: 'merge_blocked',
+            operatorId: state.currentUserId || '',
+            operatorName: user?.username || '未知',
+            timestamp: new Date().toISOString(),
+            fieldSources: [],
+            blockReason: item.blockReason,
+          },
+        })
+        continue
+      }
+
+      const schemeResolutions = conflictResolutions[item.existingScheme.id]
+      let mergedScheme = { ...item.existingScheme }
+      const fieldSources: SchemeMergeFieldSource[] = []
+
+      for (const diff of item.fieldDiffs) {
+        const resolution = schemeResolutions[diff.fieldName] || 'keep_original'
+        if (resolution === 'use_new') {
+          mergedScheme = setFieldValue(mergedScheme, diff.fieldName, diff.newValue)
+          fieldSources.push({
+            fieldName: diff.fieldName,
+            fieldLabel: FIELD_LABELS[diff.fieldName],
+            source: 'new',
+            originalValue: diff.originalValue,
+            newValue: diff.newValue,
+          })
+        } else {
+          fieldSources.push({
+            fieldName: diff.fieldName,
+            fieldLabel: FIELD_LABELS[diff.fieldName],
+            source: 'original',
+            originalValue: diff.originalValue,
+            newValue: diff.newValue,
+          })
+        }
+      }
+
+      mergedScheme = { ...mergedScheme, updatedAt: new Date().toISOString() }
+      dispatch({ type: 'UPDATE_IMPORT_SCHEME', payload: mergedScheme })
+      addSchemeAuditLog(item.existingScheme.id, mergedScheme.name, 'merge', `合并导入方案「${mergedScheme.name}」`)
+      emitSchemeChange('merge', item.existingScheme.id, mergedScheme.name, { detail: `合并导入方案「${mergedScheme.name}」` })
+
+      dispatch({
+        type: 'ADD_SCHEME_MERGE_LOG',
+        payload: {
+          id: uuidv4(),
+          mergeId,
+          schemeId: item.existingScheme.id,
+          schemeName: item.existingScheme.name,
+          action: 'merge',
+          operatorId: state.currentUserId || '',
+          operatorName: user?.username || '未知',
+          timestamp: new Date().toISOString(),
+          fieldSources,
+        },
+      })
+      mergedCount++
+    }
+
+    const blockedCount = preview.conflictItems.filter((c) => !c.canMerge).length
+
+    addOperationLog('merge', '合并方案', `合并完成：新增${newCount}，合并${mergedCount}，阻止${blockedCount}`, mergeId)
+    dispatch({ type: 'SET_LAST_SCHEME_MERGE_ID', mergeId })
+
+    return { success: true, mergedCount, newCount, blockedCount, mergeId }
+  }
+
+  const canUndoLastSchemeMerge = (): boolean => {
+    if (!state.lastSchemeMergeId) return false
+    return state.schemeMergeSnapshots.some((s) => s.mergeId === state.lastSchemeMergeId)
+  }
+
+  const undoLastSchemeMerge = (): { success: boolean; error?: string } => {
+    if (!canUndoLastSchemeMerge()) {
+      return { success: false, error: '无可撤销的合并记录' }
+    }
+
+    const snapshot = state.schemeMergeSnapshots.find((s) => s.mergeId === state.lastSchemeMergeId)
+    if (!snapshot) return { success: false, error: '合并快照不存在' }
+
+    dispatch({
+      type: 'RESTORE_SCHEME_MERGE',
+      payload: { originalSchemes: snapshot.originalSchemes, addedSchemeIds: snapshot.addedSchemeIds },
+    })
+
+    const user = getCurrentUser()
+    const logEntries = state.schemeMergeLogs.filter((l) => l.mergeId === snapshot.mergeId)
+    for (const entry of logEntries) {
+      dispatch({
+        type: 'ADD_SCHEME_MERGE_LOG',
+        payload: {
+          id: uuidv4(),
+          mergeId: snapshot.mergeId,
+          schemeId: entry.schemeId,
+          schemeName: entry.schemeName,
+          action: 'merge_undo',
+          operatorId: state.currentUserId || '',
+          operatorName: user?.username || '未知',
+          timestamp: new Date().toISOString(),
+          fieldSources: [],
+          detail: `撤销合并「${snapshot.mergeId}」`,
+        },
+      })
+
+      if (entry.action === 'merge') {
+        addSchemeAuditLog(entry.schemeId, entry.schemeName, 'merge_undo', `撤销合并方案「${entry.schemeName}」`)
+        emitSchemeChange('merge_undo', entry.schemeId, entry.schemeName, { detail: `撤销合并方案「${entry.schemeName}」` })
+      }
+    }
+
+    addOperationLog('merge', '撤销合并', `撤销合并操作：${snapshot.mergeId}`, snapshot.mergeId)
+
+    return { success: true }
+  }
+
+  const getSchemeMergeLog = (schemeId: string): SchemeMergeLogEntry[] => {
+    return state.schemeMergeLogs.filter((l) => l.schemeId === schemeId)
+  }
+
   const getTaskAuditLog = (taskId: string): TaskAuditLogEntry[] => {
     return state.taskAuditLog.filter((l) => l.taskId === taskId)
   }
@@ -1607,6 +2008,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
         canModifyTask,
         setLastActiveTask,
         buildImportValidationPipeline,
+        previewSchemeMerge,
+        mergeImportSchemes,
+        undoLastSchemeMerge,
+        canUndoLastSchemeMerge,
+        getSchemeMergeLog,
       }}
     >
       {children}

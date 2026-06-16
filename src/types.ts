@@ -147,7 +147,7 @@ export interface ImportScheme {
   updatedAt: string
 }
 
-export type SchemeAuditAction = 'create' | 'rename' | 'copy' | 'delete' | 'modify' | 'import' | 'export' | 'lock' | 'unlock'
+export type SchemeAuditAction = 'create' | 'rename' | 'copy' | 'delete' | 'modify' | 'import' | 'export' | 'lock' | 'unlock' | 'merge' | 'merge_undo'
 
 export interface SchemeAuditLogEntry {
   id: string
@@ -160,9 +160,83 @@ export interface SchemeAuditLogEntry {
   detail?: string
 }
 
-export type ConflictResolution = 'overwrite' | 'skip'
+export type ConflictResolution = 'overwrite' | 'skip' | 'merge'
 
-export type SchemeChangeType = 'create' | 'update' | 'delete' | 'rename' | 'overwrite' | 'import' | 'lock' | 'unlock'
+export type MergeFieldResolution = 'keep_original' | 'use_new' | 'conflict'
+
+export type SchemeMergeableFieldName =
+  | 'columnMappings'
+  | 'defaultBatch.batchNoPattern'
+  | 'defaultBatch.batchNamePattern'
+  | 'validationToggles.skipEmptySampleNo'
+  | 'validationToggles.skipDuplicateInFile'
+  | 'validationToggles.skipDuplicateInBatch'
+  | 'validationToggles.skipInvalidQuantity'
+  | 'validationToggles.skipEmptySource'
+  | 'isShared'
+  | 'isLocked'
+
+export interface SchemeMergeFieldDiff {
+  fieldName: SchemeMergeableFieldName
+  fieldLabel: string
+  originalValue: unknown
+  newValue: unknown
+  originalDisplay: string
+  newDisplay: string
+  isSame: boolean
+  resolution: MergeFieldResolution
+}
+
+export interface SchemeMergeConflictItem {
+  incomingScheme: ImportScheme
+  existingScheme: ImportScheme
+  canMerge: boolean
+  blockReason?: string
+  fieldDiffs: SchemeMergeFieldDiff[]
+  hasUnresolvedConflicts: boolean
+}
+
+export interface SchemeMergePreview {
+  conflictItems: SchemeMergeConflictItem[]
+  newSchemes: ImportScheme[]
+  totalIncoming: number
+  conflictCount: number
+  newCount: number
+  blockedCount: number
+}
+
+export interface SchemeMergeFieldSource {
+  fieldName: SchemeMergeableFieldName
+  fieldLabel: string
+  source: 'original' | 'new'
+  originalValue: unknown
+  newValue: unknown
+}
+
+export interface SchemeMergeLogEntry {
+  id: string
+  mergeId: string
+  schemeId: string
+  schemeName: string
+  action: 'merge' | 'merge_new' | 'merge_blocked' | 'merge_undo'
+  operatorId: string
+  operatorName: string
+  timestamp: string
+  fieldSources: SchemeMergeFieldSource[]
+  blockReason?: string
+  detail?: string
+}
+
+export interface SchemeMergeSnapshot {
+  mergeId: string
+  originalSchemes: ImportScheme[]
+  addedSchemeIds: string[]
+  operatorId: string
+  operatorName: string
+  createdAt: string
+}
+
+export type SchemeChangeType = 'create' | 'update' | 'delete' | 'rename' | 'overwrite' | 'import' | 'lock' | 'unlock' | 'merge' | 'merge_undo'
 
 export interface SchemeChangeEvent {
   type: SchemeChangeType
@@ -174,7 +248,7 @@ export interface SchemeChangeEvent {
   affectedLastSelected?: boolean
 }
 
-export type OperationLogCategory = 'batch' | 'import' | 'scheme' | 'task'
+export type OperationLogCategory = 'batch' | 'import' | 'scheme' | 'task' | 'merge'
 
 export interface OperationLogEntry {
   id: string
@@ -264,4 +338,7 @@ export interface AppData {
   lastActiveTaskId: string | null
   rollbackSnapshots: ImportRollbackSnapshot[]
   lastImportId: string | null
+  schemeMergeLogs: SchemeMergeLogEntry[]
+  lastSchemeMergeId: string | null
+  schemeMergeSnapshots: SchemeMergeSnapshot[]
 }
