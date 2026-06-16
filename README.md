@@ -412,7 +412,7 @@ npm run build
 │   └── preload.js      # 预加载脚本（IPC 通信桥接）
 ├── src/                # React 前端代码
 │   ├── pages/          # 页面组件
-│   │   ├── SampleReceive.tsx      # 样本接收页
+│   │   ├── SampleReceive.tsx      # 样本接收页（含导入弹窗、快速建批、方案导入导出）
 │   │   ├── SampleList.tsx         # 样本列表页
 │   │   ├── BatchList.tsx          # 批次管理页
 │   │   ├── BatchLedger.tsx        # 批次流转台账页
@@ -420,12 +420,15 @@ npm run build
 │   │   ├── ImportSchemeManager.tsx # 导入方案管理页
 │   │   └── HandoverExport.tsx     # 交接导出页
 │   ├── store/          # 状态管理
-│   │   └── AppContext.tsx      # 全局状态与业务逻辑
-│   ├── types.ts        # 类型定义
+│   │   └── AppContext.tsx      # 全局状态与业务逻辑（含操作日志）
+│   ├── types.ts        # 类型定义（含 OperationLogEntry）
 │   ├── App.tsx         # 主应用（侧边栏导航）
 │   ├── main.tsx        # 入口文件
 │   ├── electron.d.ts   # Electron API 类型声明
-│   └── styles.css      # 全局样式
+│   └── styles.css      # 全局样式（含 modal-overlay-top 分层弹窗）
+├── tests/              # 回归测试
+│   ├── batch-import-regression.test.js  # 批量导入、方案、校验开关、操作日志、完整链路
+│   └── regression.test.js               # 交接导出、撤销退回回归测试
 ├── index.html          # HTML 模板
 ├── package.json
 ├── tsconfig.json

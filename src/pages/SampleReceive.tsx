@@ -1,9 +1,9 @@
 import { useState, useRef, useEffect } from 'react'
 import { useApp } from '../store/AppContext'
-import { STATUS_LABELS, STATUS_COLORS, PrevalidateSummary, ValidationToggles, SchemeChangeEvent } from '../types'
+import { STATUS_LABELS, STATUS_COLORS, PrevalidateSummary, ValidationToggles, SchemeChangeEvent, ConflictResolution } from '../types'
 
 function SampleReceive() {
-  const { state, createBatch, addSample, getCurrentUser, parseCSV, parseCSVWithScheme, prevalidateImportCSV, batchImportSamples, doExportCSV, setLastSelectedScheme, resolveDefaultBatch, clearLastSchemeChange, isLastSelectedSchemeValid } = useApp()
+  const { state, createBatch, addSample, getCurrentUser, parseCSV, parseCSVWithScheme, prevalidateImportCSV, batchImportSamples, doExportCSV, setLastSelectedScheme, resolveDefaultBatch, clearLastSchemeChange, isLastSelectedSchemeValid, importSchemesJSON, exportSchemesJSON, doExportJSON } = useApp()
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [showBatchModal, setShowBatchModal] = useState(false)
   const [batchNo, setBatchNo] = useState('')
@@ -26,8 +26,16 @@ function SampleReceive() {
   const [importModalBatchNo, setImportModalBatchNo] = useState('')
   const [importModalBatchName, setImportModalBatchName] = useState('')
   const [showQuickBatchModal, setShowQuickBatchModal] = useState(false)
+  const [quickBatchErrorMsg, setQuickBatchErrorMsg] = useState('')
   const [pendingCSVContent, setPendingCSVContent] = useState<string | null>(null)
   const [pendingFileName, setPendingFileName] = useState<string | null>(null)
+
+  const [showQuickSchemeImportModal, setShowQuickSchemeImportModal] = useState(false)
+  const [quickSchemeImportJSON, setQuickSchemeImportJSON] = useState('')
+  const [quickSchemeImportResult, setQuickSchemeImportResult] = useState<{
+    success: boolean; importedCount: number; skippedCount: number; overwrittenCount: number; error?: string
+  } | null>(null)
+  const [quickSchemeConflictResolution, setQuickSchemeConflictResolution] = useState<ConflictResolution>('skip')
 
   useEffect(() => {
     if (!state.lastSchemeChange) {
@@ -325,18 +333,22 @@ function SampleReceive() {
       const resolvedBatchName = resolveDefaultBatch(scheme.defaultBatch.batchNamePattern)
       setImportModalBatchNo(resolvedBatchNo)
       setImportModalBatchName(resolvedBatchName)
+    } else {
+      setImportModalBatchNo('')
+      setImportModalBatchName('')
     }
+    setQuickBatchErrorMsg('')
     setShowQuickBatchModal(true)
   }
 
   const handleConfirmQuickCreateBatch = () => {
     if (!importModalBatchNo.trim()) {
-      setErrorMsg('请输入批次编号')
+      setQuickBatchErrorMsg('请输入批次编号')
       return
     }
     const exists = state.batches.some((b) => b.batchNo === importModalBatchNo.trim())
     if (exists) {
-      setErrorMsg('批次编号已存在')
+      setQuickBatchErrorMsg('批次编号已存在')
       return
     }
     const batch = createBatch(importModalBatchNo.trim(), importModalBatchName.trim())
@@ -344,7 +356,7 @@ function SampleReceive() {
     setShowQuickBatchModal(false)
     setImportModalBatchNo('')
     setImportModalBatchName('')
-    setErrorMsg('')
+    setQuickBatchErrorMsg('')
     setSuccessMsg(`已创建批次：${batch.batchNo}`)
 
     if (pendingCSVContent) {
@@ -404,6 +416,26 @@ function SampleReceive() {
     const batch = createBatch(resolvedBatchNo, resolvedBatchName)
     setSelectedBatchId(batch.id)
     setSuccessMsg(`已按方案自动创建批次：${resolvedBatchNo}`)
+  }
+
+  const handleQuickSchemeImport = () => {
+    if (!quickSchemeImportJSON.trim()) {
+      setQuickSchemeImportResult({ success: false, importedCount: 0, skippedCount: 0, overwrittenCount: 0, error: '请输入或选择 JSON 文件' })
+      return
+    }
+    const result = importSchemesJSON(quickSchemeImportJSON, quickSchemeConflictResolution)
+    setQuickSchemeImportResult(result)
+    if (result.success) {
+      setQuickSchemeImportJSON('')
+    }
+  }
+
+  const handleExportCurrentScheme = () => {
+    const scheme = state.importSchemes.find((s) => s.id === selectedSchemeId)
+    if (!scheme) return
+    const json = exportSchemesJSON([scheme.id])
+    doExportJSON(json, `导入方案_${scheme.name}_${new Date().toISOString().slice(0, 10)}.json`)
+    setSuccessMsg(`已导出方案「${scheme.name}」`)
   }
 
   const selectedScheme = state.importSchemes.find((s) => s.id === selectedSchemeId)
@@ -594,59 +626,6 @@ function SampleReceive() {
         </div>
       )}
 
-      {showQuickBatchModal && (
-        <div className="modal-overlay" onClick={() => setShowQuickBatchModal(false)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              <div className="modal-title">创建接收批次</div>
-              <div className="modal-close" onClick={() => setShowQuickBatchModal(false)}>×</div>
-            </div>
-            <div className="modal-body">
-              {errorMsg && <div className="alert alert-error">{errorMsg}</div>}
-              <div className="form-group">
-                <label className="form-label">批次编号 *</label>
-                <input
-                  type="text"
-                  className="form-input"
-                  value={importModalBatchNo}
-                  onChange={(e) => setImportModalBatchNo(e.target.value)}
-                  placeholder="例如：BATCH-20240616-001"
-                  autoFocus
-                />
-              </div>
-              <div className="form-group">
-                <label className="form-label">批次名称</label>
-                <input
-                  type="text"
-                  className="form-input"
-                  value={importModalBatchName}
-                  onChange={(e) => setImportModalBatchName(e.target.value)}
-                  placeholder="例如：6月16日第一批送检"
-                />
-              </div>
-              {pendingFileName && (
-                <div style={{ padding: '10px', background: '#f0f7ff', borderRadius: 4, fontSize: 13 }}>
-                  ✓ 创建后将自动对已选文件「{pendingFileName}」进行预检
-                </div>
-              )}
-            </div>
-            <div className="modal-footer">
-              <button className="btn btn-default" onClick={() => {
-                setShowQuickBatchModal(false)
-                setErrorMsg('')
-                setImportModalBatchNo('')
-                setImportModalBatchName('')
-              }}>
-                取消
-              </button>
-              <button className="btn btn-primary" onClick={handleConfirmQuickCreateBatch}>
-                创建并继续导入
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
       {showImportModal && (
         <div className="modal-overlay" onClick={handleCloseImportModal}>
           <div className="modal" onClick={(e) => e.stopPropagation()} style={{ width: 700, maxWidth: '90vw' }}>
@@ -732,13 +711,14 @@ function SampleReceive() {
                     </div>
                   )}
 
-                  {state.importSchemes.length > 0 && (
-                    <div className="form-group">
-                      <label className="form-label">套用导入方案</label>
+                  <div className="form-group">
+                    <label className="form-label">套用导入方案</label>
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                       <select
                         className="form-input"
                         value={selectedSchemeId}
                         onChange={(e) => handleSchemeChange(e.target.value)}
+                        style={{ flex: 1 }}
                       >
                         <option value="">不使用方案（默认配置）</option>
                         {state.importSchemes.map((s) => (
@@ -747,8 +727,16 @@ function SampleReceive() {
                           </option>
                         ))}
                       </select>
+                      <button className="btn btn-default btn-sm" onClick={() => setShowQuickSchemeImportModal(true)} title="快速导入方案 JSON">
+                        📥
+                      </button>
+                      {selectedScheme && (
+                        <button className="btn btn-default btn-sm" onClick={handleExportCurrentScheme} title="导出当前方案 JSON">
+                          📤
+                        </button>
+                      )}
                     </div>
-                  )}
+                  </div>
                   {selectedScheme && (
                     <div style={{ padding: 10, background: '#f0f7ff', borderRadius: 4, marginBottom: 16, fontSize: 13 }}>
                       <div><strong>方案：</strong>{selectedScheme.name}</div>
@@ -892,6 +880,214 @@ function SampleReceive() {
                 }}>
                   重新选择文件
                 </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showQuickBatchModal && (
+        <div className="modal-overlay-top" onClick={() => {
+          setShowQuickBatchModal(false)
+          setQuickBatchErrorMsg('')
+          setImportModalBatchNo('')
+          setImportModalBatchName('')
+        }}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <div className="modal-title">创建接收批次</div>
+              <div className="modal-close" onClick={() => {
+                setShowQuickBatchModal(false)
+                setQuickBatchErrorMsg('')
+                setImportModalBatchNo('')
+                setImportModalBatchName('')
+              }}>×</div>
+            </div>
+            <div className="modal-body">
+              {quickBatchErrorMsg && <div className="alert alert-error">{quickBatchErrorMsg}</div>}
+              <div className="form-group">
+                <label className="form-label">批次编号 *</label>
+                <input
+                  type="text"
+                  className="form-input"
+                  value={importModalBatchNo}
+                  onChange={(e) => setImportModalBatchNo(e.target.value)}
+                  placeholder="例如：BATCH-20240616-001"
+                  autoFocus
+                />
+              </div>
+              <div className="form-group">
+                <label className="form-label">批次名称</label>
+                <input
+                  type="text"
+                  className="form-input"
+                  value={importModalBatchName}
+                  onChange={(e) => setImportModalBatchName(e.target.value)}
+                  placeholder="例如：6月16日第一批送检"
+                />
+              </div>
+              {pendingFileName && (
+                <div style={{ padding: '10px', background: '#f0f7ff', borderRadius: 4, fontSize: 13 }}>
+                  ✓ 创建后将自动对已选文件「{pendingFileName}」进行预检
+                </div>
+              )}
+              {selectedScheme && (
+                <div style={{ padding: '10px', background: '#f0f7ff', borderRadius: 4, fontSize: 13, marginTop: 8 }}>
+                  ✓ 将套用方案「{selectedScheme.name}」的校验开关和列映射
+                </div>
+              )}
+            </div>
+            <div className="modal-footer">
+              <button className="btn btn-default" onClick={() => {
+                setShowQuickBatchModal(false)
+                setQuickBatchErrorMsg('')
+                setImportModalBatchNo('')
+                setImportModalBatchName('')
+              }}>
+                取消
+              </button>
+              <button className="btn btn-primary" onClick={handleConfirmQuickCreateBatch}>
+                创建并继续导入
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showQuickSchemeImportModal && (
+        <div className="modal-overlay-top" onClick={() => {
+          setShowQuickSchemeImportModal(false)
+          setQuickSchemeImportJSON('')
+          setQuickSchemeImportResult(null)
+          setQuickSchemeConflictResolution('skip')
+        }}>
+          <div className="modal" onClick={(e) => e.stopPropagation()} style={{ width: 600, maxWidth: '90vw' }}>
+            <div className="modal-header">
+              <div className="modal-title">快速导入方案 JSON</div>
+              <div className="modal-close" onClick={() => {
+                setShowQuickSchemeImportModal(false)
+                setQuickSchemeImportJSON('')
+                setQuickSchemeImportResult(null)
+                setQuickSchemeConflictResolution('skip')
+              }}>×</div>
+            </div>
+            <div className="modal-body">
+              {!quickSchemeImportResult ? (
+                <>
+                  <div className="form-group">
+                    <label className="form-label">选择 JSON 文件</label>
+                    <input
+                      type="file"
+                      accept=".json"
+                      onChange={(e) => {
+                        const file = e.target.files?.[0]
+                        if (!file) return
+                        const reader = new FileReader()
+                        reader.onload = (event) => {
+                          const content = event.target?.result as string
+                          setQuickSchemeImportJSON(content)
+                        }
+                        reader.readAsText(file)
+                      }}
+                      className="form-input"
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">或粘贴 JSON 内容</label>
+                    <textarea
+                      className="form-textarea"
+                      value={quickSchemeImportJSON}
+                      onChange={(e) => setQuickSchemeImportJSON(e.target.value)}
+                      rows={4}
+                      placeholder='{"version":1,"schemes":[...]}'
+                    />
+                  </div>
+                  {quickSchemeImportJSON.trim() && (() => {
+                    try {
+                      const data = JSON.parse(quickSchemeImportJSON)
+                      if (!data.schemes || !Array.isArray(data.schemes)) return null
+                      const conflicts = data.schemes.filter((s: any) =>
+                        state.importSchemes.some((es) => es.name === s.name)
+                      )
+                      if (conflicts.length === 0) return null
+                      return (
+                        <div style={{
+                          padding: '10px 14px',
+                          background: '#fff7e6',
+                          border: '1px solid #ffd591',
+                          borderRadius: 4,
+                          marginBottom: 12,
+                          fontSize: 13,
+                        }}>
+                          <div style={{ fontWeight: 600, marginBottom: 6, color: '#d46b08' }}>
+                            ⚠️ 检测到 {conflicts.length} 个同名冲突
+                          </div>
+                          {conflicts.map((c: any, idx: number) => (
+                            <div key={idx} style={{ padding: '2px 0' }}>• 「{c.name}」</div>
+                          ))}
+                        </div>
+                      )
+                    } catch {
+                      return null
+                    }
+                  })()}
+                  <div className="form-group">
+                    <label className="form-label">同名冲突处理</label>
+                    <div style={{ display: 'flex', gap: 16, marginTop: 8 }}>
+                      <label style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
+                        <input
+                          type="radio"
+                          name="quick-conflict"
+                          checked={quickSchemeConflictResolution === 'skip'}
+                          onChange={() => setQuickSchemeConflictResolution('skip')}
+                        />
+                        跳过（保留现有方案）
+                      </label>
+                      <label style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
+                        <input
+                          type="radio"
+                          name="quick-conflict"
+                          checked={quickSchemeConflictResolution === 'overwrite'}
+                          onChange={() => setQuickSchemeConflictResolution('overwrite')}
+                        />
+                        覆盖（替换现有方案）
+                      </label>
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <div style={{
+                  padding: 16,
+                  borderRadius: 4,
+                  background: quickSchemeImportResult.success ? '#f6ffed' : '#fff2f0',
+                  border: `1px solid ${quickSchemeImportResult.success ? '#b7eb8f' : '#ffa39e'}`,
+                }}>
+                  {quickSchemeImportResult.success ? (
+                    <>
+                      <strong>✅ 导入完成</strong>
+                      <div style={{ marginTop: 8, fontSize: 14 }}>
+                        <div>新增：<strong>{quickSchemeImportResult.importedCount}</strong> 个</div>
+                        <div>覆盖：<strong>{quickSchemeImportResult.overwrittenCount}</strong> 个</div>
+                        <div>跳过：<strong>{quickSchemeImportResult.skippedCount}</strong> 个</div>
+                      </div>
+                    </>
+                  ) : (
+                    <strong>❌ 导入失败：{quickSchemeImportResult.error}</strong>
+                  )}
+                </div>
+              )}
+            </div>
+            <div className="modal-footer">
+              <button className="btn btn-default" onClick={() => {
+                setShowQuickSchemeImportModal(false)
+                setQuickSchemeImportJSON('')
+                setQuickSchemeImportResult(null)
+                setQuickSchemeConflictResolution('skip')
+              }}>
+                {quickSchemeImportResult ? '完成' : '取消'}
+              </button>
+              {!quickSchemeImportResult && (
+                <button className="btn btn-primary" onClick={handleQuickSchemeImport}>确认导入</button>
               )}
             </div>
           </div>

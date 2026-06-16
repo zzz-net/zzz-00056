@@ -26,6 +26,7 @@ const defaultData = {
   schemeAuditLog: [],
   lastSelectedSchemeId: null,
   lastSchemeChange: null,
+  operationLog: [],
 }
 
 function mergeWithDefaults(data) {
@@ -38,6 +39,7 @@ function mergeWithDefaults(data) {
     schemeAuditLog: data.schemeAuditLog || [],
     lastSelectedSchemeId: data.lastSelectedSchemeId || null,
     lastSchemeChange: data.lastSchemeChange || null,
+    operationLog: data.operationLog || [],
     samples: (data.samples || []).map((s) => ({
       ...s,
       history: s.history || [],

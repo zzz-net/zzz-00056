@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useReducer, useEffect, ReactNode, useState, useRef } from 'react'
-import { AppData, Sample, Batch, HistoryRecord, SampleStatus, User, ImportResult, BatchLedgerEntry, PrevalidateSummary, PrevalidateResult, ImportScheme, SchemeAuditLogEntry, SchemeAuditAction, ConflictResolution, ColumnMapping, ValidationToggles, DefaultBatchInfo, SchemeChangeEvent, SchemeChangeType } from '../types'
+import { AppData, Sample, Batch, HistoryRecord, SampleStatus, User, ImportResult, BatchLedgerEntry, PrevalidateSummary, PrevalidateResult, ImportScheme, SchemeAuditLogEntry, SchemeAuditAction, ConflictResolution, ColumnMapping, ValidationToggles, DefaultBatchInfo, SchemeChangeEvent, SchemeChangeType, OperationLogEntry, OperationLogCategory } from '../types'
 import { v4 as uuidv4 } from 'uuid'
 
 const STORAGE_KEY = 'lab-sample-tracker-data'
@@ -24,6 +24,7 @@ type Action =
   | { type: 'SET_LAST_SELECTED_SCHEME'; schemeId: string | null }
   | { type: 'SET_LAST_SCHEME_CHANGE'; payload: SchemeChangeEvent | null }
   | { type: 'CLEAR_LAST_SCHEME_CHANGE' }
+  | { type: 'ADD_OPERATION_LOG'; payload: OperationLogEntry }
 
 const defaultData: AppData = {
   users: [
@@ -39,6 +40,7 @@ const defaultData: AppData = {
   schemeAuditLog: [],
   lastSelectedSchemeId: null,
   lastSchemeChange: null,
+  operationLog: [],
 }
 
 const initialState: AppState = defaultData
@@ -123,6 +125,8 @@ function appReducer(state: AppState, action: Action): AppState {
       return { ...state, lastSchemeChange: action.payload }
     case 'CLEAR_LAST_SCHEME_CHANGE':
       return { ...state, lastSchemeChange: null }
+    case 'ADD_OPERATION_LOG':
+      return { ...state, operationLog: [...state.operationLog, action.payload] }
     default:
       return state
   }
@@ -197,6 +201,7 @@ interface AppContextType {
   resolveDefaultBatch: (pattern: string) => string
   clearLastSchemeChange: () => void
   isLastSelectedSchemeValid: () => boolean
+  addOperationLog: (category: OperationLogCategory, action: string, detail?: string, targetId?: string, targetName?: string) => void
 }
 
 const AppContext = createContext<AppContextType | null>(null)
@@ -226,6 +231,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       schemeAuditLog: data.schemeAuditLog || [],
       lastSelectedSchemeId: data.lastSelectedSchemeId || null,
       lastSchemeChange: data.lastSchemeChange || null,
+      operationLog: data.operationLog || [],
       samples: (data.samples || []).map((s) => ({
         ...s,
         history: s.history || [],
@@ -324,6 +330,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       createdBy: user?.username || '未知',
     }
     dispatch({ type: 'ADD_BATCH', payload: batch })
+    addOperationLog('batch', '创建批次', `创建批次：${batchNo}${name ? ' - ' + name : ''}`, batch.id, batchNo)
     return batch
   }
 
@@ -702,6 +709,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     importResult?: ImportResult
     importedSampleIds?: string[]
   } => {
+    const skipDupCheck = opts?.validationToggles?.skipDuplicateInFile === true
     const validRows = validatedRows.filter((r) => r.valid)
     const invalidRows = validatedRows.filter((r) => !r.valid)
     const importId = uuidv4()
@@ -734,8 +742,25 @@ export function AppProvider({ children }: { children: ReactNode }) {
       })
     }
 
+    const importedInThisBatch = new Map<string, string>()
+
     for (const row of validRows) {
       try {
+        if (skipDupCheck && importedInThisBatch.has(row.sampleNo)) {
+          const existingSampleId = importedInThisBatch.get(row.sampleNo)!
+          const existingSample = state.samples.find((s) => s.id === existingSampleId)
+          if (existingSample) {
+            importedSampleIds.push(existingSample.id)
+            importResult.successCount++
+            importResult.details.push({
+              rowIndex: row.rowIndex,
+              sampleNo: row.sampleNo,
+              success: true,
+            })
+            continue
+          }
+        }
+
         const result = addSample({
           batchId,
           sampleNo: row.sampleNo,
@@ -748,6 +773,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
         if (result.success && result.sample) {
           importedSampleIds.push(result.sample.id)
+          importedInThisBatch.set(row.sampleNo, result.sample.id)
           importResult.successCount++
           importResult.details.push({
             rowIndex: row.rowIndex,
@@ -775,6 +801,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
 
     dispatch({ type: 'ADD_IMPORT_RESULT', payload: importResult })
+
+    const batch = state.batches.find((b) => b.id === batchId)
+    addOperationLog(
+      'import',
+      '批量导入',
+      `批次${batch?.batchNo || batchId}：成功${importResult.successCount}条，失败${importResult.failedCount}条${opts?.schemeName ? '，方案：' + opts.schemeName : ''}`,
+      importId,
+      batch?.batchNo
+    )
 
     return {
       success: true,
@@ -901,6 +936,22 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return state.importSchemes.some((s) => s.id === state.lastSelectedSchemeId)
   }
 
+  const addOperationLog = (category: OperationLogCategory, action: string, detail?: string, targetId?: string, targetName?: string) => {
+    const user = getCurrentUser()
+    const entry: OperationLogEntry = {
+      id: uuidv4(),
+      category,
+      action,
+      operatorId: state.currentUserId || '',
+      operatorName: user?.username || '未知',
+      timestamp: new Date().toISOString(),
+      detail,
+      targetId,
+      targetName,
+    }
+    dispatch({ type: 'ADD_OPERATION_LOG', payload: entry })
+  }
+
   const createImportScheme = (name: string, opts?: {
     columnMappings?: ColumnMapping[]
     defaultBatch?: DefaultBatchInfo
@@ -1020,6 +1071,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     for (const s of schemes) {
       addSchemeAuditLog(s.id, s.name, 'export', '导出方案')
     }
+    addOperationLog('scheme', '导出方案', `导出${schemes.length}个方案`, undefined, schemes.map(s => s.name).join('、'))
     return JSON.stringify(exportData, null, 2)
   }
 
@@ -1083,6 +1135,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       addSchemeAuditLog(newScheme.id, newScheme.name, 'import', `导入新方案「${newScheme.name}」`)
       emitSchemeChange('import', newScheme.id, newScheme.name, { detail: `导入新方案「${newScheme.name}」` })
     }
+
+    addOperationLog('scheme', '导入方案', `导入完成：新增${importedCount}，覆盖${overwrittenCount}，跳过${skippedCount}`)
 
     return { success: true, importedCount, skippedCount, overwrittenCount }
   }
@@ -1160,6 +1214,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         resolveDefaultBatch,
         clearLastSchemeChange,
         isLastSelectedSchemeValid,
+        addOperationLog,
       }}
     >
       {children}

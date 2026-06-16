@@ -174,6 +174,20 @@ export interface SchemeChangeEvent {
   affectedLastSelected?: boolean
 }
 
+export type OperationLogCategory = 'batch' | 'import' | 'scheme'
+
+export interface OperationLogEntry {
+  id: string
+  category: OperationLogCategory
+  action: string
+  operatorId: string
+  operatorName: string
+  timestamp: string
+  detail?: string
+  targetId?: string
+  targetName?: string
+}
+
 export interface AppData {
   users: User[]
   batches: Batch[]
@@ -185,4 +199,5 @@ export interface AppData {
   schemeAuditLog: SchemeAuditLogEntry[]
   lastSelectedSchemeId: string | null
   lastSchemeChange: SchemeChangeEvent | null
+  operationLog: OperationLogEntry[]
 }

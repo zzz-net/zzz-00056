@@ -32,6 +32,7 @@ function createInitialState() {
     importResults: [],
     batchLedger: [],
     currentUserId: 'user-1',
+    operationLog: [],
   };
 }
 
@@ -84,6 +85,8 @@ function fixedReducer(state, action) {
         ...state,
         batchLedger: [...state.batchLedger, action.payload],
       };
+    case 'ADD_OPERATION_LOG':
+      return { ...state, operationLog: [...state.operationLog, action.payload] };
     case 'SET_DATA':
       return action.payload;
     default:
@@ -100,10 +103,28 @@ function createBatch(state, batchNo, name) {
     createdAt: new Date().toISOString(),
     createdBy: user?.username || '未知',
   };
+  let newState = fixedReducer(state, { type: 'ADD_BATCH', payload: batch });
+  newState = addOperationLog(newState, 'batch', '创建批次', `创建批次：${batchNo}${name ? ' - ' + name : ''}`, batch.id, batchNo);
   return {
-    state: fixedReducer(state, { type: 'ADD_BATCH', payload: batch }),
+    state: newState,
     batch,
   };
+}
+
+function addOperationLog(state, category, action, detail, targetId, targetName) {
+  const user = state.users.find((u) => u.id === state.currentUserId);
+  const entry = {
+    id: uuidv4(),
+    category,
+    action,
+    operatorId: state.currentUserId || '',
+    operatorName: user?.username || '未知',
+    timestamp: new Date().toISOString(),
+    detail,
+    targetId,
+    targetName,
+  };
+  return fixedReducer(state, { type: 'ADD_OPERATION_LOG', payload: entry });
 }
 
 function checkDuplicateSampleNo(state, sampleNo, batchId, excludeId) {
@@ -207,6 +228,7 @@ function addSample(state, sampleData) {
 }
 
 function batchImportSamples(state, batchId, validatedRows, opts) {
+  const skipDupCheck = opts?.validationToggles?.skipDuplicateInFile === true;
   const validRows = validatedRows.filter((r) => r.valid);
   const invalidRows = validatedRows.filter((r) => !r.valid);
   const importId = uuidv4();
@@ -239,8 +261,25 @@ function batchImportSamples(state, batchId, validatedRows, opts) {
     });
   }
 
+  const importedInThisBatch = new Map();
+
   for (const row of validRows) {
     try {
+      if (skipDupCheck && importedInThisBatch.has(row.sampleNo)) {
+        const existingSampleId = importedInThisBatch.get(row.sampleNo);
+        const existingSample = currentState.samples.find((s) => s.id === existingSampleId);
+        if (existingSample) {
+          importedSampleIds.push(existingSample.id);
+          importResult.successCount++;
+          importResult.details.push({
+            rowIndex: row.rowIndex,
+            sampleNo: row.sampleNo,
+            success: true,
+          });
+          continue;
+        }
+      }
+
       const { newState, sample } = addSample(currentState, {
         batchId,
         sampleNo: row.sampleNo,
@@ -252,6 +291,7 @@ function batchImportSamples(state, batchId, validatedRows, opts) {
       });
       currentState = newState;
       importedSampleIds.push(sample.id);
+      importedInThisBatch.set(row.sampleNo, sample.id);
       importResult.successCount++;
       importResult.details.push({
         rowIndex: row.rowIndex,
@@ -270,6 +310,16 @@ function batchImportSamples(state, batchId, validatedRows, opts) {
   }
 
   currentState = fixedReducer(currentState, { type: 'ADD_IMPORT_RESULT', payload: importResult });
+
+  const batch = currentState.batches.find((b) => b.id === batchId);
+  currentState = addOperationLog(
+    currentState,
+    'import',
+    '批量导入',
+    `批次${batch?.batchNo || batchId}：成功${importResult.successCount}条，失败${importResult.failedCount}条${opts?.schemeName ? '，方案：' + opts.schemeName : ''}`,
+    importId,
+    batch?.batchNo
+  );
 
   return {
     state: currentState,
@@ -785,6 +835,7 @@ function createSchemeInitialState() {
     schemeAuditLog: [],
     lastSelectedSchemeId: null,
     lastSchemeChange: null,
+    operationLog: [],
   };
 }
 
@@ -824,6 +875,8 @@ function schemeReducer(state, action) {
       return { ...state, lastSchemeChange: action.payload };
     case 'CLEAR_LAST_SCHEME_CHANGE':
       return { ...state, lastSchemeChange: null };
+    case 'ADD_OPERATION_LOG':
+      return { ...state, operationLog: [...state.operationLog, action.payload] };
     case 'SET_DATA':
       return action.payload;
     default:
@@ -1021,6 +1074,7 @@ function exportSchemesJSON(state, schemeIds) {
     };
     newState = schemeReducer(newState, { type: 'ADD_SCHEME_AUDIT_LOG', payload: auditEntry });
   }
+  newState = addOperationLog(newState, 'scheme', '导出方案', `导出${schemes.length}个方案`, undefined, schemes.map(s => s.name).join('、'));
   return { state: newState, json: JSON.stringify(exportData, null, 2) };
 }
 
@@ -1103,6 +1157,8 @@ function importSchemesJSON(state, jsonString, conflictResolution = 'skip') {
     newState = schemeReducer(newState, { type: 'ADD_SCHEME_AUDIT_LOG', payload: auditEntry });
     newState = emitSchemeChange(newState, 'import', newScheme.id, newScheme.name, { detail: `导入新方案「${newScheme.name}」` });
   }
+
+  newState = addOperationLog(newState, 'scheme', '导入方案', `导入完成：新增${importedCount}，覆盖${overwrittenCount}，跳过${skippedCount}`);
 
   return {
     state: newState,
@@ -2105,11 +2161,255 @@ assert(samples50.length === 3, '数据库中3条样本');
 assert(samples50.some(s => s.sampleNo === 'S-50-01' && s.source === ''), '空来源样本成功导入');
 assert(samples50.some(s => s.sampleNo === 'S-50-03' && s.source === ''), '第3条空来源也成功导入');
 
+console.log('\n========== 操作日志 回归测试 ==========\n');
+
+console.log('【测试51】操作日志 - 创建批次写入日志');
+let state51 = createInitialState();
+const { state: s51, batch: batch51 } = createBatch(state51, 'BATCH-51', '日志测试批次');
+state51 = s51;
+assert(state51.operationLog.length === 1, '创建批次后operationLog有1条');
+assert(state51.operationLog[0].category === 'batch', '日志类别为batch');
+assert(state51.operationLog[0].action === '创建批次', '日志动作为创建批次');
+assert(state51.operationLog[0].operatorName === '操作员小王', '日志操作人为操作员小王');
+assert(state51.operationLog[0].targetId === batch51.id, '日志目标ID为批次ID');
+assert(state51.operationLog[0].targetName === 'BATCH-51', '日志目标名称为批次编号');
+assert(state51.operationLog[0].detail.includes('BATCH-51'), '日志详情包含批次编号');
+assert(state51.operationLog[0].timestamp !== undefined, '日志有时间戳');
+assert(state51.operationLog[0].id !== undefined, '日志有唯一ID');
+
+console.log('\n【测试52】操作日志 - 批量导入写入日志');
+const csv52 = [
+  { sampleNo: 'S-52-01', quantity: '5', source: '内科' },
+  { sampleNo: 'S-52-02', quantity: '3', source: '' },
+];
+const toggles52 = { ...defaultValidationToggles, skipEmptySource: true };
+const preVal52 = prevalidateImportCSVWithToggles(state51, batch51.id, csv52, toggles52);
+assert(preVal52.validCount === 2, '2条有效');
+const import52 = batchImportSamples(state51, batch51.id, preVal52.results, {
+  validationToggles: toggles52,
+});
+state51 = import52.state;
+assert(import52.importResult.successCount === 2, '导入2条成功');
+const importLogs = state51.operationLog.filter((l) => l.category === 'import');
+assert(importLogs.length === 1, '批量导入后新增1条import类日志');
+assert(importLogs[0].action === '批量导入', '日志动作为批量导入');
+assert(importLogs[0].detail.includes('成功2条'), '日志详情包含成功条数');
+assert(importLogs[0].detail.includes('失败0条'), '日志详情包含失败条数');
+
+console.log('\n【测试53】操作日志 - 方案导出写入日志');
+let state53 = createSchemeInitialState();
+const { state: s53, scheme: scheme53 } = createImportScheme(state53, '日志导出方案');
+state53 = s53;
+const export53 = exportSchemesJSON(state53, [scheme53.id]);
+state53 = export53.state;
+const schemeExportLogs = state53.operationLog.filter((l) => l.category === 'scheme');
+assert(schemeExportLogs.length === 1, '方案导出后新增1条scheme类日志');
+assert(schemeExportLogs[0].action === '导出方案', '日志动作为导出方案');
+assert(schemeExportLogs[0].detail.includes('1'), '日志详情包含导出数量');
+
+console.log('\n【测试54】操作日志 - 方案导入写入日志');
+const importJSON54 = JSON.stringify({
+  version: 1,
+  exportedAt: new Date().toISOString(),
+  exportedBy: '外部用户',
+  schemes: [{
+    name: '日志导入方案',
+    columnMappings: [{ csvColumn: '编号', targetField: 'sampleNo' }],
+    defaultBatch: { batchNoPattern: '', batchNamePattern: '' },
+    validationToggles: { ...defaultValidationToggles },
+  }],
+});
+let state54 = createSchemeInitialState();
+const import54 = importSchemesJSON(state54, importJSON54, 'skip');
+state54 = import54.state;
+const schemeImportLogs = state54.operationLog.filter((l) => l.category === 'scheme');
+assert(schemeImportLogs.length === 1, '方案导入后新增1条scheme类日志');
+assert(schemeImportLogs[0].action === '导入方案', '日志动作为导入方案');
+assert(schemeImportLogs[0].detail.includes('新增1'), '日志详情包含新增数量');
+
+console.log('\n【测试55】操作日志 - 持久化验证（重启后仍可追溯）');
+let state55 = createSchemeInitialState();
+const { state: s55a, scheme: scheme55 } = createImportScheme(state55, '持久化日志方案');
+state55 = s55a;
+const export55 = exportSchemesJSON(state55, [scheme55.id]);
+state55 = export55.state;
+assert(state55.operationLog.length >= 1, '导出前至少1条操作日志');
+const serialized55 = JSON.stringify(state55);
+const restored55 = schemeReducer(createSchemeInitialState(), { type: 'SET_DATA', payload: JSON.parse(serialized55) });
+assert(restored55.operationLog.length === state55.operationLog.length, '重启后操作日志数量一致');
+assert(restored55.operationLog[0].action === '导出方案', '重启后操作日志内容正确');
+assert(restored55.operationLog[0].operatorName === '操作员小王', '重启后操作人正确');
+
+console.log('\n========== skipDuplicateInFile batchImportSamples 一致性 回归测试 ==========\n');
+
+console.log('【测试56】skipDuplicateInFile=true 时 batchImportSamples 允许文件内重复编号');
+let state56 = createSchemeInitialState();
+const { state: s56, batch: batch56 } = createBatch(state56, 'BATCH-56', '重复编号批次');
+state56 = s56;
+const toggles56 = { ...defaultValidationToggles, skipDuplicateInFile: true };
+const rows56 = [
+  { sampleNo: 'DUP-01', quantity: '5', source: '内科' },
+  { sampleNo: 'DUP-01', quantity: '3', source: '外科' },
+  { sampleNo: 'UNIQ-01', quantity: '2', source: '儿科' },
+];
+const preVal56 = prevalidateImportCSVWithToggles(state56, batch56.id, rows56, toggles56);
+assert(preVal56.validCount === 3, '预检时3条都有效（skipDuplicateInFile=true跳过文件内重复检查）');
+const import56 = batchImportSamples(state56, batch56.id, preVal56.results, {
+  validationToggles: toggles56,
+});
+state56 = import56.state;
+assert(import56.importResult.successCount === 3, '正式导入3条都成功');
+assert(import56.importResult.failedCount === 0, '无失败');
+const dupSamples = state56.samples.filter((s) => s.sampleNo === 'DUP-01' && s.batchId === batch56.id);
+assert(dupSamples.length >= 1, '至少1条DUP-01样本成功导入');
+
+console.log('\n【测试57】skipDuplicateInFile=false 时 batchImportSamples 拦截文件内重复编号');
+let state57 = createSchemeInitialState();
+const { state: s57, batch: batch57 } = createBatch(state57, 'BATCH-57', '重复拦截批次');
+state57 = s57;
+const toggles57 = { ...defaultValidationToggles, skipDuplicateInFile: false };
+const rows57 = [
+  { sampleNo: 'DUP-57', quantity: '5', source: '内科' },
+  { sampleNo: 'DUP-57', quantity: '3', source: '外科' },
+];
+const preVal57 = prevalidateImportCSVWithToggles(state57, batch57.id, rows57, toggles57);
+assert(preVal57.validCount === 1, '预检时1条有效（skipDuplicateInFile=false拦截重复）');
+assert(preVal57.invalidCount === 1, '1条无效');
+const import57 = batchImportSamples(state57, batch57.id, preVal57.results, {
+  validationToggles: toggles57,
+});
+state57 = import57.state;
+assert(import57.importResult.successCount === 1, '正式导入1条成功');
+
+console.log('\n========== 完整桌面链路 回归测试 ==========\n');
+
+console.log('【测试58】完整桌面链路：关闭空来源校验→创建批次→导入CSV→重启→再导入→方案导入导出');
+let state58 = createSchemeInitialState();
+state58.currentUserId = 'user-1';
+const { state: s58a, scheme: scheme58 } = createImportScheme(state58, '链路方案', {
+  columnMappings: [
+    { csvColumn: '样本编号', targetField: 'sampleNo' },
+    { csvColumn: '数量', targetField: 'quantity' },
+    { csvColumn: '来源', targetField: 'source' },
+  ],
+  defaultBatch: { batchNoPattern: 'BATCH-{DATE}', batchNamePattern: '日常送检' },
+  validationToggles: { ...defaultValidationToggles, skipEmptySource: true },
+});
+state58 = s58a;
+assert(scheme58.validationToggles.skipEmptySource === true, 'skipEmptySource=true（关闭空来源校验）');
+state58 = schemeReducer(state58, { type: 'SET_LAST_SELECTED_SCHEME', schemeId: scheme58.id });
+
+const { state: s58b, batch: batch58 } = createBatch(state58, 'BATCH-58', '链路测试批次');
+state58 = s58b;
+
+const csv58 = '样本编号,数量,来源\nS-58-01,5,\nS-58-02,3,外科\nS-58-03,10,';
+const parsed58 = parseCSVWithScheme(csv58, scheme58.columnMappings);
+assert(parsed58.length === 3, 'CSV解析出3行');
+assert(parsed58[0].source === '', '第1行来源为空');
+assert(parsed58[2].source === '', '第3行来源为空');
+
+const preVal58 = prevalidateImportCSVWithToggles(state58, batch58.id, parsed58, scheme58.validationToggles);
+assert(preVal58.validCount === 3, '预检3条都有效（空来源不拦截）');
+assert(preVal58.results[0].valid === true, '第1行空来源通过');
+assert(preVal58.results[2].valid === true, '第3行空来源通过');
+
+const import58 = batchImportSamples(state58, batch58.id, preVal58.results, {
+  schemeId: scheme58.id,
+  schemeName: scheme58.name,
+  validationToggles: scheme58.validationToggles,
+  columnMappings: scheme58.columnMappings,
+});
+state58 = import58.state;
+assert(import58.importResult.successCount === 3, '正式导入3条成功');
+const emptySourceSamples58 = state58.samples.filter((s) => s.batchId === batch58.id && s.source === '');
+assert(emptySourceSamples58.length === 2, '2条空来源样本成功导入数据库');
+
+const serialized58 = JSON.stringify(state58);
+const restored58 = schemeReducer(createSchemeInitialState(), { type: 'SET_DATA', payload: JSON.parse(serialized58) });
+const restoredScheme58 = restored58.importSchemes.find((s) => s.id === scheme58.id);
+assert(restoredScheme58.validationToggles.skipEmptySource === true, '重启后skipEmptySource仍为true');
+const restoredBatch58 = restored58.batches.find((b) => b.id === batch58.id);
+assert(restoredBatch58 !== undefined, '重启后批次存在');
+assert(restored58.samples.filter((s) => s.batchId === batch58.id && s.source === '').length === 2, '重启后空来源样本仍存在');
+
+const reimportCsv58 = '样本编号,数量,来源\nS-58-04,8,\nS-58-05,6,内科';
+const parsedReimport58 = parseCSVWithScheme(reimportCsv58, restoredScheme58.columnMappings);
+const preValReimport58 = prevalidateImportCSVWithToggles(restored58, batch58.id, parsedReimport58, restoredScheme58.validationToggles);
+assert(preValReimport58.validCount === 2, '重启后再导入2条都有效（空来源仍不拦截）');
+const reimport58 = batchImportSamples(restored58, batch58.id, preValReimport58.results, {
+  schemeId: restoredScheme58.id,
+  schemeName: restoredScheme58.name,
+  validationToggles: restoredScheme58.validationToggles,
+  columnMappings: restoredScheme58.columnMappings,
+});
+const reimportedState58 = reimport58.state;
+assert(reimport58.importResult.successCount === 2, '重启后再导入2条成功');
+const allEmpty58 = reimportedState58.samples.filter((s) => s.batchId === batch58.id && s.source === '');
+assert(allEmpty58.length === 3, '重启后累计3条空来源样本');
+
+const export58 = exportSchemesJSON(reimportedState58, [scheme58.id]);
+const json58 = export58.json;
+let state58b = export58.state;
+const delete58 = deleteImportScheme(state58b, scheme58.id);
+state58b = delete58.state;
+assert(state58b.importSchemes.length === 0, '删除后无方案');
+
+const import58a = importSchemesJSON(state58b, json58, 'skip');
+assert(import58a.importedCount === 1, 'skip模式导入1个方案');
+state58b = import58a.state;
+
+const import58b = importSchemesJSON(state58b, json58, 'skip');
+assert(import58b.skippedCount === 1, '同名冲突skip模式跳过1个');
+state58b = import58b.state;
+
+const import58c = importSchemesJSON(state58b, json58, 'overwrite');
+assert(import58c.overwrittenCount === 1, '同名冲突overwrite模式覆盖1个');
+state58b = import58c.state;
+
+const reimportedScheme58b = state58b.importSchemes[0];
+assert(reimportedScheme58b.validationToggles.skipEmptySource === true, '导入覆盖后skipEmptySource仍为true');
+assert(reimportedScheme58b.createdById === 'user-1', '导入覆盖后createdById保留');
+
+const { state: s58c, batch: batch58b } = createBatch(state58b, 'BATCH-58B', '导入后链路批次');
+state58b = s58c;
+const csv58b = '样本编号,数量,来源\nS-58B-01,2,\nS-58B-02,4,内科';
+const parsed58b = parseCSVWithScheme(csv58b, reimportedScheme58b.columnMappings);
+const preVal58b = prevalidateImportCSVWithToggles(state58b, batch58b.id, parsed58b, reimportedScheme58b.validationToggles);
+assert(preVal58b.validCount === 2, '方案导入覆盖后空来源仍不拦截');
+const import58d = batchImportSamples(state58b, batch58b.id, preVal58b.results, {
+  schemeId: reimportedScheme58b.id,
+  schemeName: reimportedScheme58b.name,
+  validationToggles: reimportedScheme58b.validationToggles,
+  columnMappings: reimportedScheme58b.columnMappings,
+});
+assert(import58d.importResult.successCount === 2, '方案导入覆盖后正式导入2条成功');
+const emptySourceAfterImport = import58d.state.samples.filter((s) => s.batchId === batch58b.id && s.source === '');
+assert(emptySourceAfterImport.length === 1, '方案导入覆盖后空来源样本仍能入库');
+
+const operationLogs = import58d.state.operationLog;
+assert(operationLogs.length >= 3, '完整链路至少3条操作日志（批次、导入、方案导出、方案导入等）');
+const batchLogs = operationLogs.filter((l) => l.category === 'batch');
+const importLogs58 = operationLogs.filter((l) => l.category === 'import');
+const schemeLogs58 = operationLogs.filter((l) => l.category === 'scheme');
+assert(batchLogs.length >= 2, '至少2条批次操作日志');
+assert(importLogs58.length >= 3, '至少3条导入操作日志');
+assert(schemeLogs58.length >= 3, '至少3条方案操作日志');
+
+console.log('\n【测试59】操作日志 - 各类别日志字段完整性');
+for (const log of operationLogs) {
+  assert(log.id !== undefined, `日志ID非空: ${log.action}`);
+  assert(log.category !== undefined, `日志类别非空: ${log.action}`);
+  assert(log.action !== undefined, `日志动作非空: ${log.action}`);
+  assert(log.operatorId !== undefined, `日志操作人ID非空: ${log.action}`);
+  assert(log.operatorName !== undefined, `日志操作人名非空: ${log.action}`);
+  assert(log.timestamp !== undefined, `日志时间戳非空: ${log.action}`);
+}
+
 console.log('\n========== 测试结果 ==========\n');
 if (failures > 0) {
   console.log(`❌ 共 ${failures} 项失败，请修复。\n`);
   process.exit(1);
 } else {
-  console.log('✅ 全部通过，批量导入、台账、权限、持久化、导入方案管理、列映射、校验开关、默认批次、完整链路功能完整。\n');
+  console.log('✅ 全部通过，批量导入、台账、权限、持久化、导入方案管理、列映射、校验开关、默认批次、操作日志、完整链路功能完整。\n');
   process.exit(0);
 }
